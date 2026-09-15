@@ -134,8 +134,9 @@ impl std::fmt::Display for CaptureError {
                 f,
                 "{name:?} reports both input and output, so cpal would record its \
                  microphone instead of system audio.\n\
-                 Pick an output-only device with `--system <id>` (see `--list`), or \
-                 pass --force-system-on-duplex to override for diagnosis."
+                 Pick an output-only device — `jotter devices` marks which ones \
+                 those are — or pass `--force-system-on-duplex` to override for \
+                 diagnosis."
             ),
             Self::UnsupportedSampleFormat(fmt) => {
                 write!(f, "unsupported sample format: {fmt:?}")

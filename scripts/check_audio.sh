@@ -54,27 +54,27 @@ jotter_check_linux_audio
 
 if [[ $DIRECT -eq 1 ]]; then
   echo "==> building"
-  cargo build --quiet --bin record
-  RUN=(./target/debug/record)
+  cargo build --quiet --bin jotter
+  RUN=(./target/debug/jotter)
 else
   echo "==> building bundle"
-  # The GUI and the CLI share one bundle (one bundle id = one permission
-  # grant), so LaunchServices treats them as the same app. If the tray app is
-  # running, `open -a` would just focus it and ignore our --args entirely.
+  # The GUI and the CLI are the same binary in the same bundle, so
+  # LaunchServices treats them as one app. If the tray app is running, `open -a`
+  # would just focus it and ignore our --args entirely.
   if pgrep -f "Jotter.app/Contents/MacOS/" >/dev/null 2>&1; then
     echo "==> stopping running Jotter instance (shares this bundle)"
-    killall jotter record 2>/dev/null || true
+    killall jotter 2>/dev/null || true
     sleep 1
   fi
-  ./scripts/bundle.sh record >/dev/null
+  ./scripts/bundle.sh >/dev/null
   RUN=(open -a "$APP" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args)
 fi
 
 echo "==> devices"
 if [[ $DIRECT -eq 1 ]]; then
-  "${RUN[@]}" --list
+  "${RUN[@]}" devices
 else
-  rm -f /tmp/jotter.out; "${RUN[@]}" --list; sleep 2; cat /tmp/jotter.out
+  rm -f /tmp/jotter.out; "${RUN[@]}" devices; sleep 2; cat /tmp/jotter.out
 fi
 echo
 
@@ -116,10 +116,10 @@ fi
 
 echo "==> recording ${DURATION}s (--only $ONLY)"
 if [[ $DIRECT -eq 1 ]]; then
-  "${RUN[@]}" --only "$ONLY" --duration "$DURATION" --out "$OUT"
+  "${RUN[@]}" record --only "$ONLY" --duration "$DURATION" --out "$OUT"
 else
   rm -f /tmp/jotter.out /tmp/jotter.err
-  "${RUN[@]}" --only "$ONLY" --duration "$DURATION" --out "$OUT"
+  "${RUN[@]}" record --only "$ONLY" --duration "$DURATION" --out "$OUT"
   sleep $((DURATION + 4))
   cat /tmp/jotter.out
   [[ -s /tmp/jotter.err ]] && { echo "--- stderr ---"; cat /tmp/jotter.err; }

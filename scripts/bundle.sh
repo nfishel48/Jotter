@@ -8,12 +8,12 @@
 # description keys is what makes the permission grantable at all.
 #
 # Usage:
-#   scripts/bundle.sh            # bundle the `record` CLI (default)
-#   scripts/bundle.sh jotter     # bundle the tray app
+#   scripts/bundle.sh
 #   PROFILE=release scripts/bundle.sh
 #
-# Both binaries are always copied in, and the bundle id is fixed, so a single
-# permission grant covers whichever one is set as the entry point.
+# There is one binary: `jotter` opens the tray app when run with no arguments
+# and takes the CLI subcommands otherwise, so the same bundle — and so the same
+# permission grant, since the bundle id is fixed — covers both.
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-EXEC="${1:-record}"
+EXEC="jotter"
 PROFILE="${PROFILE:-debug}"
 BUNDLE_ID="com.nfishel.jotter"
 # Read from Cargo.toml rather than hardcoded, so released bundles report the
@@ -36,22 +36,17 @@ APP="$ROOT/build/Jotter.app"
 
 cd "$ROOT"
 
-case "$EXEC" in
-  record|jotter) ;;
-  *) echo "unknown binary: $EXEC (expected 'record' or 'jotter')" >&2; exit 1 ;;
-esac
-
-# SKIP_BUILD lets CI drop in universal binaries (lipo of arm64 + x86_64) at
-# target/$PROFILE/ first — building here would overwrite them with single-arch
-# ones.
+# SKIP_BUILD lets CI drop in a universal binary (lipo of arm64 + x86_64) at
+# target/$PROFILE/ first — building here would overwrite it with a single-arch
+# one.
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
-  echo "==> using existing binaries in target/$PROFILE"
+  echo "==> using existing binary in target/$PROFILE"
 else
   echo "==> building ($PROFILE)"
   if [[ "$PROFILE" == "release" ]]; then
-    cargo build --release --bins
+    cargo build --release --bin "$EXEC"
   else
-    cargo build --bins
+    cargo build --bin "$EXEC"
   fi
 fi
 
@@ -59,8 +54,7 @@ echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "target/$PROFILE/record" "$APP/Contents/MacOS/record"
-cp "target/$PROFILE/jotter" "$APP/Contents/MacOS/jotter"
+cp "target/$PROFILE/$EXEC" "$APP/Contents/MacOS/$EXEC"
 [[ -f assets/icon.png ]] && cp assets/icon.png "$APP/Contents/Resources/icon.png"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -125,11 +119,11 @@ codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Identifier|Signature" || true
   -f "$APP" 2>/dev/null || true
 
 echo
-echo "built $APP (entry point: $EXEC)"
+echo "built $APP"
 echo
 echo "Run it through LaunchServices so TCC attributes the request to the bundle"
-echo "rather than to your terminal:"
+echo "rather than to your terminal — with no --args it opens the tray app:"
 echo
-echo "  open -a \"$APP\" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args --list"
+echo "  open -a \"$APP\" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args devices"
 echo
 echo "or use: scripts/check_audio.sh --bundled"

@@ -9,16 +9,19 @@ scripts, see [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md).
 
 ## The shape of it
 
-Everything lives in the library crate. `src/main.rs` (the GUI) and
-`src/bin/record.rs` (a debugging CLI) are thin entry points that both drive the
-same `audio` API — so anything the CLI proves about capture also holds for the
-app.
+Everything lives in the library crate. `src/main.rs` is a thin entry point that
+parses arguments with clap and dispatches: no subcommand opens the tray app,
+`record` and `devices` run the CLI. Both front ends drive the same `audio` API —
+so anything the CLI proves about capture also holds for the app.
 
 ```mermaid
 graph TB
-    subgraph entry["Entry points"]
-        MAIN["src/main.rs<br/><i>GUI shim, 36 lines</i>"]
-        CLI["src/bin/record.rs<br/><i>debug CLI</i>"]
+    subgraph entry["Entry point"]
+        MAIN["src/main.rs<br/><i>clap dispatch</i>"]
+    end
+
+    subgraph cli["cli — command line"]
+        CLIMOD["cli.rs<br/><b>record</b> / <b>devices</b>"]
     end
 
     subgraph ui["ui — presentation, main thread"]
@@ -39,10 +42,11 @@ graph TB
     DISK[("~/Documents/Jotter/")]
 
     MAIN --> UIMOD
+    MAIN --> CLIMOD
     UIMOD --> TRAY
     UIMOD --> SET
     UIMOD --> AMOD
-    CLI --> AMOD
+    CLIMOD --> AMOD
 
     AMOD --> CAP
     AMOD --> MET
@@ -54,12 +58,25 @@ graph TB
 
     style audio fill:#1f3a4d,stroke:#4a90b8,color:#fff
     style ui fill:#3d2f4d,stroke:#9b7fb8,color:#fff
+    style cli fill:#4d3d2d,stroke:#b8956f,color:#fff
     style entry fill:#2d3d2d,stroke:#7fa87f,color:#fff
 ```
 
-The one rule worth preserving: **`audio` knows nothing about `ui`.** Dependencies
-point one way, which is why the CLI can exercise the whole capture path without
-starting a GUI.
+The one rule worth preserving: **`audio` knows nothing about `ui` or `cli`.**
+Dependencies point one way, which is why the CLI can exercise the whole capture
+path without starting a GUI.
+
+The two front ends are cargo features, both on by default:
+
+| Build | Command | Contains |
+| --- | --- | --- |
+| Default | `cargo build` | tray app + CLI |
+| CLI only | `cargo build --no-default-features --features cli` | CLI; no eframe/egui/tray-icon |
+| GUI only | `cargo build --no-default-features --features gui` | tray app; no clap |
+
+`audio` is unconditional, so it must never depend on clap or eframe — that is why
+`cli.rs` mirrors `audio::Sources` in its own `ValueEnum` shim instead of deriving
+on the real type.
 
 ---
 
@@ -340,7 +357,9 @@ explicitly rather than trusting the happy path.
 | `audio/devices.rs` | Enumeration, direction classification, `can_loopback()`, default selection |
 | `audio/capture.rs` | `open_mic` / `open_loopback`, the duplex guard, `CaptureError` and its per-platform access hints |
 | `audio/writer.rs` | `TrackWriter` / `TrackSink`, the realtime→writer boundary, format conversion |
-| `audio/meta.rs` | `Meta`, `TrackInfo`, `track_offset_secs()` |
-| `ui.rs` | `App`, the recording state machine, tray pumping, paths |
+| `audio/meta.rs` | `Meta`, `TrackInfo`, `track_offset_secs()`, `timestamp_dir_name()` |
+| `main.rs` | clap parsing and the GUI/CLI dispatch |
+| `cli.rs` | `record` / `devices` subcommands and their console output |
+| `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |
 | `ui/tray.rs` | `Tray`, `MenuAction`, event draining |
 | `ui/settings.rs` | egui window, device pickers, status rendering |

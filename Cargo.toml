@@ -11,9 +11,13 @@ path = "src/lib.rs"
 name = "jotter"
 path = "src/main.rs"
 
-[[bin]]
-name = "record"
-path = "src/bin/record.rs"
+[features]
+default = ["gui", "cli"]
+# The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
+# gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
+gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
+# The `record` / `devices` subcommands.
+cli = ["dep:clap"]
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
@@ -21,13 +25,15 @@ path = "src/bin/record.rs"
 # the `clock` support needed for Local::now().
 chrono = "0.4"
 cpal = "0.18"
-eframe = "0.36.1"
-egui = "0.36.1"
 hound = "3.5"
-image = "0.25.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tray-icon = "0.24.2"
+
+clap = { version = "4.6", features = ["derive"], optional = true }
+eframe = { version = "0.36.1", optional = true }
+egui = { version = "0.36.1", optional = true }
+image = { version = "0.25.10", optional = true }
+tray-icon = { version = "0.24.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds

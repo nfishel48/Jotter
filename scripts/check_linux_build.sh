@@ -54,6 +54,9 @@ docker run --rm -t \
       echo "--- clippy ---"; cargo clippy --all-targets --locked --color always 2>&1 | tail -20
       echo "--- test ---";   cargo test --all-targets --locked --color always 2>&1 | grep -E "test result|^test |error" | tail -20
       echo "--- build ---";  cargo build --locked --color always 2>&1 | tail -5
+      echo "--- features ---"
+      cargo check --locked --no-default-features --features cli --color always 2>&1 | tail -5
+      cargo check --locked --no-default-features --features gui --color always 2>&1 | tail -5
     else
       echo "--- cargo '"$CMD"' --all-targets ---"
       cargo '"$CMD"' --all-targets --color always 2>&1 | tail -40

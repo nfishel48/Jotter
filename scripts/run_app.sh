@@ -50,7 +50,7 @@ fi
 
 if [[ "$JOTTER_OS" == "macos" ]]; then
   echo "==> bundling"
-  ./scripts/bundle.sh jotter >/dev/null
+  ./scripts/bundle.sh >/dev/null
   echo "==> launching"
   rm -f "$OUT" "$ERR"
   open -a "$APP" --stdout "$OUT" --stderr "$ERR"

@@ -1,36 +1,75 @@
-use std::path::PathBuf;
+//! The one entry point.
+//!
+//! With no subcommand `jotter` launches the tray app; `jotter record` and
+//! `jotter devices` are the command-line front end. Bare-invocation-is-the-GUI
+//! is not a style choice: LaunchServices starts a .app with no arguments, and
+//! the bundle is the only way macOS grants the process audio permissions.
+//!
+//! Which halves exist is a build-time choice — see the `gui` and `cli` features
+//! in Cargo.toml.
 
-use jotter::ui::run;
+#[cfg(not(any(feature = "gui", feature = "cli")))]
+compile_error!("jotter needs at least one of the `gui` and `cli` features enabled");
 
-/// Locate the tray icon.
-///
-/// Inside a .app the working directory is not the repo root, so a bare
-/// relative path fails — and the app must run from the bundle, since that is
-/// the only way macOS will grant it audio permissions. Prefer the bundle's
-/// Resources directory and fall back to the repo layout for `cargo run`.
-fn icon_path() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        // .../Jotter.app/Contents/MacOS/jotter -> .../Contents/Resources/icon.png
-        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
-            let bundled = contents.join("Resources/icon.png");
-            if bundled.is_file() {
-                return bundled;
-            }
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match dispatch() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
         }
     }
-    PathBuf::from("assets/icon.png")
 }
 
-fn main() -> eframe::Result<()> {
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.viewport = native_options
-        .viewport
-        .clone()
-        // Shown on launch: the app has a Dock icon (LSUIElement is false), and
-        // a Dock icon that bounces into nothing visible reads as a failed
-        // launch. Closing the window hides it; the tray reopens it.
-        .with_visible(true)
-        .with_inner_size([420.0, 380.0]);
+#[cfg(feature = "cli")]
+use clap::Parser;
 
-    run(&icon_path(), native_options)
+#[cfg(feature = "cli")]
+#[derive(Parser)]
+#[command(
+    name = "jotter",
+    version,
+    about = "Capture a meeting to two WAV tracks",
+    long_about = "Capture a meeting to two WAV tracks.\n\nRun with no subcommand to open the tray app."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<jotter::cli::Command>,
+}
+
+#[cfg(feature = "cli")]
+fn dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    // Finder and LaunchServices may append a process-serial-number argument
+    // (`-psn_0_12345`) when opening a bundle. clap would reject it as unknown
+    // and the app would die on double-click with the error only on a stderr
+    // nobody sees, so drop it before parsing.
+    let args = std::env::args().filter(|a| !a.starts_with("-psn_"));
+
+    match Cli::parse_from(args).command {
+        Some(command) => jotter::cli::run(command),
+        None => launch_gui(),
+    }
+}
+
+#[cfg(not(feature = "cli"))]
+fn dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    // No parser in a GUI-only build, so any arguments are simply ignored.
+    jotter::ui::run()
+}
+
+#[cfg(all(feature = "cli", feature = "gui"))]
+fn launch_gui() -> Result<(), Box<dyn std::error::Error>> {
+    jotter::ui::run()
+}
+
+#[cfg(all(feature = "cli", not(feature = "gui")))]
+fn launch_gui() -> Result<(), Box<dyn std::error::Error>> {
+    use clap::CommandFactory;
+
+    // Built without the tray app, so there is nothing to fall back to — show
+    // the subcommands rather than exiting silently.
+    Cli::command().print_help()?;
+    Err("this build has no GUI (built without the `gui` feature)".into())
 }

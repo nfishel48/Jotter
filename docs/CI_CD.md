@@ -11,7 +11,12 @@ both places.
 
 Matrix: `ubuntu-latest` and `macos-latest`, `fail-fast: false` so a Linux-only
 break cannot hide a macOS-only one. Steps: `fmt --check`, `clippy`, `test`,
-`build`, all with `RUSTFLAGS: -D warnings`.
+`build`, and a feature-matrix `check`, all with `RUSTFLAGS: -D warnings`.
+
+The feature matrix exists because the GUI and the CLI are `cfg`'d halves of one
+binary: code that only compiles with both features on builds fine by default and
+breaks nobody's machine until someone builds CLI-only. With `-D warnings`, an
+import left unused under one feature fails the job.
 
 ### What the tests cover, and why so narrowly
 
@@ -29,7 +34,9 @@ hand it a duplex device and it silently records the microphone into
 
 ```sh
 cargo fmt --all --check && cargo clippy --all-targets --locked \
-  && cargo test --all-targets --locked && cargo build --locked
+  && cargo test --all-targets --locked && cargo build --locked \
+  && cargo check --locked --no-default-features --features cli \
+  && cargo check --locked --no-default-features --features gui
 
 scripts/check_linux_build.sh ci   # the Linux half, in a container
 ```
@@ -87,7 +94,7 @@ workflow runs. The `[skip ci]` in the commit message is belt-and-braces.
 | Platform | Artifact | Notes |
 | --- | --- | --- |
 | macOS | `Jotter-X.Y.Z-macos-universal.zip` | `Jotter.app`, universal via `lipo` |
-| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | `jotter` + `record` binaries |
+| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` binary (GUI + CLI) |
 
 **macOS ships the `.app`, not a bare binary** — and this is not cosmetic. macOS
 will not grant system-audio access to an executable with no bundle identity; it

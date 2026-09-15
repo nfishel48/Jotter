@@ -68,7 +68,7 @@ impl App {
             return;
         }
 
-        let dir = recordings_root().join(recording_dir_name());
+        let dir = recordings_root().join(audio::meta::timestamp_dir_name());
 
         let config = RecordConfig {
             sources: Sources::Both,
@@ -169,13 +169,6 @@ pub fn recordings_root() -> PathBuf {
     documents.join("Jotter")
 }
 
-/// Folder name for a new recording, e.g. `2026-09-15_14-32-08`.
-///
-/// Local time, and zero-padded so lexical order matches chronological order.
-fn recording_dir_name() -> String {
-    chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
-}
-
 /// Open a path in the system file manager, creating it first if it does not
 /// exist yet.
 ///
@@ -267,8 +260,42 @@ impl eframe::App for App {
     }
 }
 
-pub fn run(icon: &std::path::Path, native_options: eframe::NativeOptions) -> eframe::Result<()> {
-    let icon = icon.to_path_buf();
+/// Locate the tray icon.
+///
+/// Inside a .app the working directory is not the repo root, so a bare
+/// relative path fails — and the app must run from the bundle, since that is
+/// the only way macOS will grant it audio permissions. Prefer the bundle's
+/// Resources directory and fall back to the repo layout for `cargo run`.
+fn icon_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        // .../Jotter.app/Contents/MacOS/jotter -> .../Contents/Resources/icon.png
+        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+            let bundled = contents.join("Resources/icon.png");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
+    PathBuf::from("assets/icon.png")
+}
+
+/// Launch the tray app. Blocks until the user quits.
+///
+/// eframe's types stay inside this module on purpose: `src/main.rs` is shared
+/// with the CLI and has to compile with the `gui` feature off, so nothing in
+/// its signature may mention eframe.
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport = native_options
+        .viewport
+        .clone()
+        // Shown on launch: the app has a Dock icon (LSUIElement is false), and
+        // a Dock icon that bounces into nothing visible reads as a failed
+        // launch. Closing the window hides it; the tray reopens it.
+        .with_visible(true)
+        .with_inner_size([420.0, 380.0]);
+
+    let icon = icon_path();
     eframe::run_native(
         "Jotter",
         native_options,
@@ -276,5 +303,7 @@ pub fn run(icon: &std::path::Path, native_options: eframe::NativeOptions) -> efr
             let tray = tray::build_tray(tray::load_icon(&icon));
             Ok(Box::new(App::new(tray)))
         }),
-    )
+    )?;
+
+    Ok(())
 }

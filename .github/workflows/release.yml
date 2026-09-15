@@ -108,35 +108,33 @@ jobs:
           set -euo pipefail
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-          cargo build --release --locked --bins --target aarch64-apple-darwin
-          cargo build --release --locked --bins --target x86_64-apple-darwin
+          cargo build --release --locked --bin jotter --target aarch64-apple-darwin
+          cargo build --release --locked --bin jotter --target x86_64-apple-darwin
 
           mkdir -p target/release
-          for bin in jotter record; do
-            lipo -create \
-              "target/aarch64-apple-darwin/release/$bin" \
-              "target/x86_64-apple-darwin/release/$bin" \
-              -output "target/release/$bin"
-            lipo -info "target/release/$bin"
-          done
+          lipo -create \
+            "target/aarch64-apple-darwin/release/jotter" \
+            "target/x86_64-apple-darwin/release/jotter" \
+            -output "target/release/jotter"
+          lipo -info "target/release/jotter"
 
           # The .app is the shippable unit, not the bare binary: macOS will not
           # grant system-audio access to an executable with no bundle identity.
-          SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh jotter
+          SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh
 
           ditto -c -k --keepParent build/Jotter.app "Jotter-macos-universal.zip"
 
-      - name: Build Linux binaries
+      - name: Build Linux binary
         if: runner.os == 'Linux'
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --bins
+          cargo build --release --locked --bin jotter
 
           STAGE="jotter-$VERSION-linux-x86_64"
           mkdir -p "$STAGE"
-          cp target/release/jotter target/release/record "$STAGE/"
+          cp target/release/jotter "$STAGE/"
           cp docs/AUDIO_CAPTURE.md "$STAGE/README.md"
           tar -czf "jotter-linux-x86_64.tar.gz" "$STAGE"
 

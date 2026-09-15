@@ -10,9 +10,24 @@ scripts/run_app.sh                # build + bundle + launch the tray app
 scripts/check_audio.sh            # CLI loop: tone → record → analyze (silent)
 scripts/check_audio.sh system     # isolate system audio
 scripts/check_audio.sh mic        # isolate microphone
-scripts/bundle.sh jotter          # rebuild build/Jotter.app (GUI entry point)
-scripts/bundle.sh record          # rebuild it with the CLI as entry point
+scripts/bundle.sh                 # rebuild build/Jotter.app
 ```
+
+One binary serves both front ends. `jotter` with no arguments opens the tray app
+— which is what LaunchServices does when it starts the bundle — and the
+subcommands are the CLI:
+
+```sh
+jotter devices                                    # list devices and loopback flags
+jotter record --duration 10                       # capture both tracks for 10s
+jotter record --only mic                          # one permission at a time
+jotter record --system <id> --out /tmp/take1
+jotter --help
+```
+
+Either half can be dropped at build time: `cargo build --no-default-features
+--features cli` leaves out eframe/egui/tray-icon entirely, and `--features gui`
+leaves out clap.
 
 ## The tray app
 
@@ -79,10 +94,10 @@ This is the single most important operational fact. A bare `cargo build` binary
 **cannot** capture system audio, and fails silently:
 
 ```
-$ codesign -dv target/debug/record
-Identifier=record-884d72896c4f307f      # changes every rebuild
+$ codesign -dv target/debug/jotter
+Identifier=jotter-884d72896c4f307f      # changes every rebuild
 flags=0x20002(adhoc,linker-signed)
-$ file target/debug/record
+$ file target/debug/jotter
 Mach-O 64-bit executable arm64          # not a bundle
 ```
 
@@ -99,10 +114,10 @@ bundle rather than to your terminal:
 
 ```sh
 open -a build/Jotter.app --stdout /tmp/jotter.out --stderr /tmp/jotter.err \
-     --args --only both --duration 10 --out /tmp/rec
+     --args record --only both --duration 10 --out /tmp/rec
 ```
 
-Running `build/Jotter.app/Contents/MacOS/record` directly does *not* work —
+Running `build/Jotter.app/Contents/MacOS/jotter` directly does *not* work —
 that re-attributes the request to the terminal. `open` detaches stdout, which
 is why `--stdout`/`--stderr` are needed to see output.
 
@@ -239,16 +254,16 @@ is +0.007s.
 ## Code layout
 
 ```
-src/lib.rs              pub mod audio  (exists so src/bin/record.rs can share it)
+src/lib.rs              pub mod audio, plus the feature-gated cli and ui
+src/main.rs             clap parsing; no subcommand -> GUI, otherwise -> cli
+src/cli.rs              record / devices subcommands       (feature "cli")
+src/ui.rs               App state machine, tray pumping    (feature "gui")
 src/audio/mod.rs        Recorder: start(RecordConfig) -> RecordingHandle, .stop()
 src/audio/devices.rs    enumeration, direction classification, default selection
 src/audio/capture.rs    open_mic / open_loopback, duplex guard, error mapping
 src/audio/writer.rs     mpsc -> hound writer thread, f32->i16, mono downmix
-src/audio/meta.rs       meta.json sidecar
-src/bin/record.rs       CLI
+src/audio/meta.rs       meta.json sidecar, timestamp_dir_name()
 ```
-
-`src/main.rs` and `src/ui/` are untouched — no tray wiring yet.
 
 Output per recording:
 
@@ -276,7 +291,8 @@ recordings/<timestamp>/
   noise.
 - **Mic defaults to the built-in mic, not the system default.** macOS drops
   Bluetooth headsets into a degraded call mode once their mic is activated,
-  which hurts transcription of your own track. Override with `--mic <id>`.
+  which hurts transcription of your own track. Override with
+  `jotter record --mic <id>`.
 - **`stream.play()`, not `start()`.** cpal 0.17 stopped auto-starting streams.
   `start()`/`stop()` exist only on unreleased master; 0.18.2 is `play()`/`pause()`.
 - **Errors print cpal's `ErrorKind`.** cpal's own `Display` prints only the
@@ -297,9 +313,10 @@ scripts/analyze_wav.py  per-track duration/peak/RMS + 440Hz purity
 build/Jotter.app        the signed bundle (gitignored; survives cargo clean)
 ```
 
-`bundle.sh` copies **both** binaries into the bundle and pins one bundle id, so
-a single permission grant covers the CLI and the tray app. Pass `jotter` to
-switch the entry point: `scripts/bundle.sh jotter`.
+`bundle.sh` copies the single `jotter` binary into the bundle and pins one
+bundle id, so one permission grant covers the CLI and the tray app. It takes no
+arguments — which of the two you get is decided by the arguments you pass to
+`open --args`, not at bundle time.
 
 ## Next steps
 

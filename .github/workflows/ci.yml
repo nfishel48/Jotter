@@ -73,3 +73,11 @@ jobs:
 
       - name: Build
         run: cargo build --locked
+
+      # The GUI and the CLI are cfg'd halves of one binary, so a change that
+      # only compiles with both features on is easy to miss. RUSTFLAGS above
+      # makes an import that is unused under one feature a hard failure here.
+      - name: Build (feature matrix)
+        run: |
+          cargo check --locked --no-default-features --features cli
+          cargo check --locked --no-default-features --features gui
