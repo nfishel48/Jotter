@@ -5,3 +5,7 @@
 /build
 #ignore my bash scripts used for testing locally
 *.sh
+# ...but scripts/ is project tooling, not scratch work, and CI shells out to it
+# (release.yml runs scripts/bump_version.sh and scripts/bundle.sh). Leaving
+# these ignored makes the release job fail with exit 127 at the version step.
+!scripts/*.sh
