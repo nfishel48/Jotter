@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use eframe::egui;
 use crate::audio::meta::Meta;
+use eframe::egui;
 
 /// One row of the device pickers. Flattened out of `DeviceInfo` so the UI does
 /// not hold cpal `Device` handles alive across frames.

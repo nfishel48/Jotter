@@ -1,6 +1,6 @@
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
     Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem},
 };
 
 /// What the user asked for via the tray menu.

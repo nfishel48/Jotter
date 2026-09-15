@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use jotter::audio::{self, devices::DeviceChoice, RecordConfig, Sources};
+use jotter::audio::{self, RecordConfig, Sources, devices::DeviceChoice};
 
 const USAGE: &str = "\
 record — capture mic + system audio to two WAV tracks
@@ -63,10 +63,7 @@ fn parse_args() -> Result<Option<Args>, String> {
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut value = |name: &str| {
-            it.next()
-                .ok_or_else(|| format!("{name} requires a value"))
-        };
+        let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} requires a value"));
         match arg.as_str() {
             "--list" => args.list = true,
             "--force-system-on-duplex" => args.force_duplex = true,
@@ -108,9 +105,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return list_devices();
     }
 
-    let out_dir = args.out.unwrap_or_else(|| {
-        PathBuf::from("recordings").join(timestamp_dir())
-    });
+    let out_dir = args
+        .out
+        .unwrap_or_else(|| PathBuf::from("recordings").join(timestamp_dir()));
 
     let config = RecordConfig {
         sources: args.sources,
@@ -169,8 +166,8 @@ fn list_devices() -> Result<(), Box<dyn std::error::Error>> {
     let devices = audio::devices::list_devices()?;
 
     println!(
-        "{:<38} {:<9} {:<5} {:<5} {:<9} {}",
-        "NAME", "DIRECTION", "IN", "OUT", "LOOPBACK", "FLAGS"
+        "{:<38} {:<9} {:<5} {:<5} {:<9} FLAGS",
+        "NAME", "DIRECTION", "IN", "OUT", "LOOPBACK"
     );
     for (_, info) in &devices {
         let mut flags = Vec::new();

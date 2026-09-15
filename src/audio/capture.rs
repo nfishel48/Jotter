@@ -81,7 +81,10 @@ impl Source {
 #[derive(Debug)]
 pub enum CaptureError {
     /// A failure attributable to one specific stream.
-    Stream { source: Source, err: cpal::Error },
+    Stream {
+        source: Source,
+        err: cpal::Error,
+    },
     Cpal(cpal::Error),
     Wav(hound::Error),
     Io(std::io::Error),
@@ -94,7 +97,9 @@ pub enum CaptureError {
     /// support. On a duplex device it silently opens an ordinary capture
     /// stream, so the "system audio" file would contain the microphone. That
     /// failure is invisible until transcription, so it is refused up front.
-    DuplexSystemDevice { name: String },
+    DuplexSystemDevice {
+        name: String,
+    },
     UnsupportedSampleFormat(SampleFormat),
     WriterPanicked,
 }
@@ -289,7 +294,7 @@ where
     f32: cpal::FromSample<T>,
 {
     let stream = device.build_input_stream(
-        config.clone(),
+        *config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
             sink.push(data, info.timestamp().callback.as_nanos());
         },

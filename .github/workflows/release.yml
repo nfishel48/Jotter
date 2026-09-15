@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Only one release at a time: two concurrent runs would race on the version
+# bump and could tag the same number twice. Not cancel-in-progress — a
+# half-finished release that has already pushed a tag must be allowed to
+# finish publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the version bump, create the release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Exactly the suite CI runs, so "tests pass" means the same thing on a
+  # release as on a branch push.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Bump patch version
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # A shallow checkout cannot push.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          set -euo pipefail
+          VERSION="$(./scripts/bump_version.sh patch)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+
+          # [skip ci] is belt-and-braces: pushes authenticated with
+          # GITHUB_TOKEN do not trigger workflow runs, so this cannot loop.
+          git commit -m "chore: release v$VERSION [skip ci]"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin main --follow-tags
+
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (universal)
+            artifact: Jotter-macos-universal
+          - os: ubuntu-latest
+            label: Linux (x86_64)
+            artifact: jotter-linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Build the bumped commit, so binaries report the version we tagged.
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libasound2-dev \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+
+      # One download that runs on both Apple Silicon and Intel, rather than
+      # making users work out which they have.
+      - name: Build macOS universal .app
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+          cargo build --release --locked --bins --target aarch64-apple-darwin
+          cargo build --release --locked --bins --target x86_64-apple-darwin
+
+          mkdir -p target/release
+          for bin in jotter record; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin" \
+              -output "target/release/$bin"
+            lipo -info "target/release/$bin"
+          done
+
+          # The .app is the shippable unit, not the bare binary: macOS will not
+          # grant system-audio access to an executable with no bundle identity.
+          SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh jotter
+
+          ditto -c -k --keepParent build/Jotter.app "Jotter-macos-universal.zip"
+
+      - name: Build Linux binaries
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bins
+
+          STAGE="jotter-$VERSION-linux-x86_64"
+          mkdir -p "$STAGE"
+          cp target/release/jotter target/release/record "$STAGE/"
+          cp docs/AUDIO_CAPTURE.md "$STAGE/README.md"
+          tar -czf "jotter-linux-x86_64.tar.gz" "$STAGE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            Jotter-macos-universal.zip
+            jotter-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          # Need tag history to build the changelog range.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+
+          # Renamed here rather than in the build jobs so the version appears
+          # in the downloaded filename without threading it through artifacts.
+          mv dist/Jotter-macos-universal.zip "dist/Jotter-$VERSION-macos-universal.zip"
+          mv dist/jotter-linux-x86_64.tar.gz "dist/jotter-$VERSION-linux-x86_64.tar.gz"
+
+          cat > notes.md <<'EOF'
+          ## Install
+
+          ### macOS (Apple Silicon and Intel)
+
+          Download the `.zip`, unzip, and move `Jotter.app` to `/Applications`.
+
+          The app is **ad-hoc signed, not notarized**, so Gatekeeper will refuse
+          it on first launch. Either right-click the app and choose **Open**, or
+          run:
+
+          ```
+          xattr -dr com.apple.quarantine /Applications/Jotter.app
+          ```
+
+          You must run the `.app`, not the binary inside it. macOS will not grant
+          system-audio access to an executable with no bundle identity — it feeds
+          the capture digital silence instead of prompting.
+
+          On first recording, approve **Microphone**, **Screen & System Audio
+          Recording**, and **Documents** access.
+
+          ### Linux (x86_64)
+
+          ```
+          tar -xzf jotter-VERSION-linux-x86_64.tar.gz
+          cd jotter-VERSION-linux-x86_64
+          ./jotter
+          ```
+
+          Needs a running **PipeWire** session — system-audio capture uses
+          PipeWire monitor capture and cannot work on the ALSA fallback. Runtime
+          libraries: `libpipewire-0.3`, `libasound2`, `gtk3`,
+          `libayatana-appindicator3`.
+
+          > Linux is **compile-verified only**. Capture has not been confirmed
+          > against a live PipeWire session.
+
+          Recordings are written to `~/Documents/Jotter/`, one folder per session
+          containing `mic.wav`, `system.wav` and `meta.json`.
+          EOF
+
+          sed -i "s/VERSION/$VERSION/g" notes.md
+
+          # Changelog built by hand rather than with --generate-notes, which is
+          # not reliably combinable with --notes-file.
+          PREV="$(git describe --tags --abbrev=0 "v$VERSION^" 2>/dev/null || true)"
+          {
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty='- %s (%h)' "$PREV..v$VERSION"
+            else
+              echo "- Initial release"
+            fi
+          } >> notes.md
+
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file notes.md \
+            dist/*.zip dist/*.tar.gz

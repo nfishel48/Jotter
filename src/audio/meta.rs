@@ -67,3 +67,61 @@ pub fn to_unix_secs(t: SystemTime) -> f64 {
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(first_callback_nanos: Option<u128>) -> TrackInfo {
+        TrackInfo {
+            path: "t.wav".into(),
+            device_name: "Test".into(),
+            device_id: None,
+            sample_rate: 48_000,
+            channels: 1,
+            source_channels: 2,
+            frames: 48_000,
+            first_callback_nanos,
+            stream_errors: 0,
+        }
+    }
+
+    fn meta(mic: Option<u128>, system: Option<u128>) -> Meta {
+        Meta {
+            started_at: 100.0,
+            ended_at: 110.5,
+            mic: Some(track(mic)),
+            system: Some(track(system)),
+        }
+    }
+
+    #[test]
+    fn offset_is_system_relative_to_mic() {
+        // System started 7ms after the mic -> positive offset.
+        let m = meta(Some(1_000_000_000), Some(1_007_000_000));
+        assert!((m.track_offset_secs().unwrap() - 0.007).abs() < 1e-9);
+
+        // And negative in the other direction, rather than underflowing the
+        // u128 subtraction.
+        let m = meta(Some(1_007_000_000), Some(1_000_000_000));
+        assert!((m.track_offset_secs().unwrap() + 0.007).abs() < 1e-9);
+    }
+
+    #[test]
+    fn offset_is_none_without_both_callbacks() {
+        assert!(meta(None, Some(1)).track_offset_secs().is_none());
+        assert!(meta(Some(1), None).track_offset_secs().is_none());
+
+        // A track that never opened at all, not merely one without callbacks.
+        let m = Meta {
+            mic: None,
+            ..meta(Some(1), Some(2))
+        };
+        assert!(m.track_offset_secs().is_none());
+    }
+
+    #[test]
+    fn duration_is_wall_clock_span() {
+        assert!((meta(None, None).duration_secs() - 10.5).abs() < 1e-9);
+    }
+}

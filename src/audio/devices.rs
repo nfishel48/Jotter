@@ -121,17 +121,15 @@ pub fn resolve_mic(choice: DeviceChoice) -> Result<(Device, DeviceInfo), Capture
         DeviceChoice::Default => {
             let devices = list_devices()?;
 
-            let built_in = devices.iter().position(|(_, i)| {
-                i.supports_input && i.interface == cpal::InterfaceType::BuiltIn
-            });
+            let built_in = devices
+                .iter()
+                .position(|(_, i)| i.supports_input && i.interface == cpal::InterfaceType::BuiltIn);
             let fallback = devices
                 .iter()
                 .position(|(_, i)| i.supports_input && i.is_default_input)
                 .or_else(|| devices.iter().position(|(_, i)| i.supports_input));
 
-            let idx = built_in
-                .or(fallback)
-                .ok_or(CaptureError::NoInputDevice)?;
+            let idx = built_in.or(fallback).ok_or(CaptureError::NoInputDevice)?;
 
             let mut devices = devices;
             Ok(devices.swap_remove(idx))
@@ -167,5 +165,42 @@ pub fn resolve_system(choice: DeviceChoice) -> Result<(Device, DeviceInfo), Capt
             let mut devices = devices;
             Ok(devices.swap_remove(idx))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(supports_input: bool, supports_output: bool) -> DeviceInfo {
+        DeviceInfo {
+            id: Some("test".into()),
+            name: "Test".into(),
+            direction: cpal::DeviceDirection::Unknown,
+            supports_input,
+            supports_output,
+            interface: cpal::InterfaceType::Unknown,
+            device_type: cpal::DeviceType::Unknown,
+            is_default_input: false,
+            is_default_output: false,
+        }
+    }
+
+    // The most important invariant in the codebase. cpal has no explicit
+    // loopback API: it only taps system audio on a device reporting NO input.
+    // Hand it a duplex device and it silently records the microphone into
+    // system.wav instead — no error, discovered only at transcription time.
+    #[test]
+    fn only_output_only_devices_can_loopback() {
+        assert!(info(false, true).can_loopback(), "output-only must tap");
+        assert!(
+            !info(true, true).can_loopback(),
+            "duplex must NOT tap: cpal would record the mic into system.wav"
+        );
+        assert!(!info(true, false).can_loopback(), "input-only cannot tap");
+        assert!(
+            !info(false, false).can_loopback(),
+            "inert device cannot tap"
+        );
     }
 }

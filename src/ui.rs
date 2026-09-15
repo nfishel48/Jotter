@@ -4,7 +4,7 @@ pub mod tray;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::audio::{self, devices::DeviceChoice, RecordConfig, Sources};
+use crate::audio::{self, RecordConfig, Sources, devices::DeviceChoice};
 
 use tray::MenuAction;
 

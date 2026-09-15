@@ -6,9 +6,9 @@
 //! channel.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::capture::CaptureError;
@@ -55,25 +55,35 @@ impl TrackSink {
             )
             .ok();
 
-        let channels = self.source_channels.max(1) as usize;
-        let frames = data.len() / channels;
-        let mut out = Vec::with_capacity(frames);
-
-        // Downmix to mono by averaging. System audio arrives stereo; the mic is
-        // already mono, in which case this is a straight copy.
-        for frame in data.chunks_exact(channels) {
-            let sum: f32 = frame
-                .iter()
-                .map(|s| cpal::Sample::to_sample::<f32>(*s))
-                .sum();
-            out.push(f32_to_i16(sum / channels as f32));
-        }
+        let out = downmix_to_mono(data, self.source_channels.max(1) as usize);
 
         // A full or disconnected channel means the writer thread is gone or
         // hopelessly behind. Dropping the buffer is the only realtime-safe
         // option; the frame count in meta.json will reflect the loss.
         let _ = self.tx.send(out);
     }
+}
+
+/// Collapse interleaved samples to mono `i16` by averaging each frame.
+///
+/// System audio arrives stereo; the mic is already mono, in which case this is
+/// a straight conversion. Split out of `push` so the conversion can be tested
+/// without standing up a cpal stream.
+fn downmix_to_mono<T>(data: &[T], channels: usize) -> Vec<i16>
+where
+    T: cpal::Sample,
+    f32: cpal::FromSample<T>,
+{
+    let channels = channels.max(1);
+    let mut out = Vec::with_capacity(data.len() / channels);
+    for frame in data.chunks_exact(channels) {
+        let sum: f32 = frame
+            .iter()
+            .map(|s| cpal::Sample::to_sample::<f32>(*s))
+            .sum();
+        out.push(f32_to_i16(sum / channels as f32));
+    }
+    out
 }
 
 fn f32_to_i16(sample: f32) -> i16 {
@@ -169,5 +179,51 @@ impl TrackWriter {
             first_callback_nanos: (first != UNSET).then_some(first as u128),
             stream_errors: self.stream_errors.load(Ordering::Relaxed),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamps_instead_of_wrapping() {
+        // The bug this guards: without the clamp, `as i16` on an out-of-range
+        // value wraps, turning a loud passage into harsh noise. Loopback audio
+        // genuinely exceeds +/-1.0 when an app applies its own gain.
+        assert_eq!(f32_to_i16(2.0), i16::MAX);
+        assert_eq!(f32_to_i16(-2.0), -i16::MAX);
+        assert_eq!(f32_to_i16(1.0), i16::MAX);
+        assert_eq!(f32_to_i16(0.0), 0);
+    }
+
+    #[test]
+    fn mono_passes_through() {
+        assert_eq!(
+            downmix_to_mono(&[0.0f32, 1.0, -1.0], 1),
+            [0, i16::MAX, -i16::MAX]
+        );
+    }
+
+    #[test]
+    fn stereo_averages_each_frame() {
+        // L=1.0 R=-1.0 cancels; L=R=0.5 stays 0.5.
+        let out = downmix_to_mono(&[1.0f32, -1.0, 0.5, 0.5], 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[1], f32_to_i16(0.5));
+    }
+
+    #[test]
+    fn ignores_trailing_partial_frame() {
+        // chunks_exact drops a partial frame rather than reading past it or
+        // fabricating a channel.
+        assert_eq!(downmix_to_mono(&[1.0f32, 1.0, 1.0], 2).len(), 1);
+    }
+
+    #[test]
+    fn zero_channels_does_not_divide_by_zero() {
+        // source_channels comes from the driver; 0 would panic on divide.
+        assert_eq!(downmix_to_mono(&[1.0f32], 0), [i16::MAX]);
     }
 }
