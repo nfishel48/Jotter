@@ -2,14 +2,22 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    # main is deliberately excluded: release.yml calls this same workflow, so a
+    # standalone run there would duplicate the work and — worse — collide on
+    # the concurrency group below and cancel the release's own test job.
+    branches-ignore: [main]
   pull_request:
   workflow_call: # so release.yml can gate on exactly this suite
 
 concurrency:
   # Supersede in-flight runs for the same branch; the newest push is the one
   # anyone cares about.
-  group: ci-${{ github.ref }}
+  #
+  # github.workflow is included because in a reusable workflow it resolves to
+  # the *caller's* name ("Release"), keeping release runs in a separate group
+  # from direct CI runs. Without it both evaluate to the same key and cancel
+  # each other.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
