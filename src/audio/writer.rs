@@ -1,0 +1,173 @@
+//! WAV writing, off the audio thread.
+//!
+//! cpal's data callback runs on a realtime audio thread; blocking it on file
+//! I/O causes dropouts. So the callback only does cheap work (downmix to mono,
+//! convert to `i16`) and hands an owned buffer to a writer thread over a
+//! channel.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use super::capture::CaptureError;
+use super::meta::TrackInfo;
+
+/// Handle to one track's writer thread.
+pub struct TrackWriter {
+    tx: Option<Sender<Vec<i16>>>,
+    thread: JoinHandle<Result<u64, hound::Error>>,
+    path: PathBuf,
+    device_name: String,
+    device_id: Option<String>,
+    sample_rate: u32,
+    source_channels: u16,
+    first_callback_nanos: Arc<AtomicU64>,
+    stream_errors: Arc<AtomicU64>,
+}
+
+/// The callback-side half: everything the audio thread needs, and nothing that
+/// would block it.
+pub struct TrackSink {
+    tx: Sender<Vec<i16>>,
+    source_channels: u16,
+    first_callback_nanos: Arc<AtomicU64>,
+}
+
+/// Sentinel for "no callback seen yet". A real `StreamInstant` of exactly zero
+/// nanoseconds is not meaningfully distinguishable from unset here.
+const UNSET: u64 = u64::MAX;
+
+impl TrackSink {
+    /// Called from the audio thread for every buffer.
+    pub fn push<T>(&self, data: &[T], first_callback_nanos: u128)
+    where
+        T: cpal::Sample,
+        f32: cpal::FromSample<T>,
+    {
+        self.first_callback_nanos
+            .compare_exchange(
+                UNSET,
+                first_callback_nanos.min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .ok();
+
+        let channels = self.source_channels.max(1) as usize;
+        let frames = data.len() / channels;
+        let mut out = Vec::with_capacity(frames);
+
+        // Downmix to mono by averaging. System audio arrives stereo; the mic is
+        // already mono, in which case this is a straight copy.
+        for frame in data.chunks_exact(channels) {
+            let sum: f32 = frame
+                .iter()
+                .map(|s| cpal::Sample::to_sample::<f32>(*s))
+                .sum();
+            out.push(f32_to_i16(sum / channels as f32));
+        }
+
+        // A full or disconnected channel means the writer thread is gone or
+        // hopelessly behind. Dropping the buffer is the only realtime-safe
+        // option; the frame count in meta.json will reflect the loss.
+        let _ = self.tx.send(out);
+    }
+}
+
+fn f32_to_i16(sample: f32) -> i16 {
+    // Clamp before scaling: loopback audio can exceed [-1.0, 1.0] when an app
+    // applies its own gain, and wrapping there would turn a loud passage into
+    // harsh noise that wrecks transcription.
+    (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+}
+
+impl TrackWriter {
+    pub fn new(
+        path: &Path,
+        device_name: String,
+        device_id: Option<String>,
+        sample_rate: u32,
+        source_channels: u16,
+    ) -> Result<(TrackWriter, TrackSink), CaptureError> {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let writer = hound::WavWriter::create(path, spec)?;
+        let (tx, rx): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = mpsc::channel();
+
+        let thread = std::thread::spawn(move || {
+            let mut writer = writer;
+            let mut frames: u64 = 0;
+            for buf in rx {
+                for sample in buf {
+                    writer.write_sample(sample)?;
+                    frames += 1;
+                }
+            }
+            // Finalize writes the real RIFF length. Without it the file has a
+            // placeholder header and many tools refuse to open it.
+            writer.finalize()?;
+            Ok(frames)
+        });
+
+        let first_callback_nanos = Arc::new(AtomicU64::new(UNSET));
+        let stream_errors = Arc::new(AtomicU64::new(0));
+
+        let sink = TrackSink {
+            tx: tx.clone(),
+            source_channels,
+            first_callback_nanos: Arc::clone(&first_callback_nanos),
+        };
+
+        Ok((
+            TrackWriter {
+                tx: Some(tx),
+                thread,
+                path: path.to_path_buf(),
+                device_name,
+                device_id,
+                sample_rate,
+                source_channels,
+                first_callback_nanos,
+                stream_errors,
+            },
+            sink,
+        ))
+    }
+
+    /// Shared counter for cpal's error callback to bump.
+    pub fn error_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.stream_errors)
+    }
+
+    /// Close the channel, wait for the writer thread, and report the track.
+    pub fn finish(mut self) -> Result<TrackInfo, CaptureError> {
+        // Dropping the last sender ends the writer thread's `for buf in rx`.
+        self.tx.take();
+
+        let frames = self
+            .thread
+            .join()
+            .map_err(|_| CaptureError::WriterPanicked)??;
+
+        let first = self.first_callback_nanos.load(Ordering::Relaxed);
+
+        Ok(TrackInfo {
+            path: self.path.display().to_string(),
+            device_name: self.device_name,
+            device_id: self.device_id,
+            sample_rate: self.sample_rate,
+            channels: 1,
+            source_channels: self.source_channels,
+            frames,
+            first_callback_nanos: (first != UNSET).then_some(first as u128),
+            stream_errors: self.stream_errors.load(Ordering::Relaxed),
+        })
+    }
+}

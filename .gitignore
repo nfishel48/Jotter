@@ -1,0 +1,7 @@
+/target
+# Captured meeting audio — large, and personal by nature.
+/recordings
+.DS_Store
+/build
+#ignore my bash scripts used for testing locally
+*.sh
