@@ -11,6 +11,20 @@ pub enum MenuAction {
     Quit,
 }
 
+impl MenuAction {
+    /// The menu item's id, as reported to telemetry.
+    ///
+    /// Matches the string ids the items are built with below, so a chart of tray
+    /// usage reads the same as the menu.
+    pub fn telemetry_id(self) -> &'static str {
+        match self {
+            Self::ToggleRecord => "record",
+            Self::ShowSettings => "settings",
+            Self::Quit => "quit",
+        }
+    }
+}
+
 /// The tray icon plus the handles needed to mutate it later.
 ///
 /// `record_item` is kept so its label can be flipped between "Start" and "Stop"

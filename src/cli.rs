@@ -15,6 +15,8 @@ use std::time::Duration;
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::audio::{self, RecordConfig, Sources, devices::DeviceChoice};
+use crate::config::Settings;
+use crate::telemetry::{Surface, Telemetry, events};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -23,6 +25,19 @@ pub enum Command {
     /// List audio devices and show which ones can be tapped for system audio
     #[command(alias = "list")]
     Devices,
+    /// Show or change whether anonymous usage data is sent
+    Telemetry(TelemetryArgs),
+}
+
+#[derive(Args)]
+pub struct TelemetryArgs {
+    /// Start sending anonymous usage and crash reports
+    #[arg(long, conflicts_with = "disable")]
+    enable: bool,
+
+    /// Stop sending anonymous usage and crash reports
+    #[arg(long)]
+    disable: bool,
 }
 
 #[derive(Args)]
@@ -63,6 +78,16 @@ enum SourcesArg {
     Both,
 }
 
+impl SourcesArg {
+    fn telemetry_name(self) -> &'static str {
+        match self {
+            Self::Mic => "mic",
+            Self::System => "system",
+            Self::Both => "both",
+        }
+    }
+}
+
 impl From<SourcesArg> for Sources {
     fn from(arg: SourcesArg) -> Self {
         match arg {
@@ -74,18 +99,82 @@ impl From<SourcesArg> for Sources {
 }
 
 pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
-    match command {
-        Command::Devices => list_devices(),
-        Command::Record(args) => record(args),
+    // `telemetry` is handled before the worker starts: it only edits the
+    // settings file, and starting a reporting client in order to turn reporting
+    // off would be a strange thing to do.
+    if let Command::Telemetry(args) = command {
+        return telemetry_command(args);
     }
+
+    let mut settings = Settings::load();
+    let telemetry = Telemetry::init(Surface::Cli, &mut settings);
+    telemetry.track(events::APP_STARTED, &[("is_first_run", false.into())]);
+
+    let result = match command {
+        Command::Devices => list_devices(&telemetry),
+        Command::Record(args) => record(args, &telemetry),
+        Command::Telemetry(_) => unreachable!("handled above"),
+    };
+
+    // Explicit rather than relying on `Drop`: this is the one place a CLI run
+    // can lose its whole queue, since the process exits immediately after.
+    telemetry.track(events::APP_EXITED, &[("reason", "cli_done".into())]);
+    telemetry.shutdown();
+
+    result
 }
 
-fn record(args: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
+/// `jotter telemetry [--enable|--disable]`, and with neither, a status report.
+///
+/// The headless half of the settings-pane checkbox. Someone running the CLI on a
+/// server or over SSH should not have to launch a tray app to opt out.
+fn telemetry_command(args: TelemetryArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut settings = Settings::load();
+
+    if args.enable || args.disable {
+        settings.telemetry_enabled = args.enable;
+        settings.telemetry_notice_seen = true;
+        settings.save()?;
+    }
+
+    let stored = if settings.telemetry_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    println!("telemetry: {stored}");
+    println!("  config:  {}", crate::config::path().display());
+
+    if !cfg!(feature = "telemetry") {
+        println!("  note:    this build has telemetry compiled out and sends nothing");
+    }
+
+    match crate::config::env_override() {
+        crate::config::EnvOverride::ForceOff => {
+            println!("  note:    overridden to OFF by DO_NOT_TRACK / JOTTER_TELEMETRY");
+        }
+        crate::config::EnvOverride::ForceOn => {
+            println!("  note:    overridden to ON by JOTTER_TELEMETRY");
+        }
+        crate::config::EnvOverride::Unset => {}
+    }
+
+    println!("\nSee docs/TELEMETRY.md for exactly what is collected.");
+    Ok(())
+}
+
+fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
     // Relative, and deliberately not the GUI's ~/Documents/Jotter: a debugging
     // run should land next to the checkout, not in with real recordings.
     let out_dir = args
         .out
         .unwrap_or_else(|| PathBuf::from("recordings").join(audio::meta::timestamp_dir_name()));
+
+    // Read before the args are consumed by `RecordConfig`; all three are shapes
+    // of the request, not identifiers of a device.
+    let sources = args.only.telemetry_name();
+    let mic_is_default = args.mic.is_none();
+    let system_is_default = args.system.is_none();
 
     let config = RecordConfig {
         sources: args.only.into(),
@@ -95,7 +184,23 @@ fn record(args: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
         allow_duplex_system: args.force_system_on_duplex,
     };
 
-    let handle = audio::start(config)?;
+    let handle = match audio::start(config) {
+        Ok(handle) => handle,
+        Err(e) => {
+            report_failure(telemetry, "start", &e);
+            return Err(e.into());
+        }
+    };
+    telemetry.track(
+        events::RECORDING_STARTED,
+        &[
+            ("sources", sources.into()),
+            ("mic_is_default", mic_is_default.into()),
+            ("system_is_default", system_is_default.into()),
+            ("force_system_on_duplex", args.force_system_on_duplex.into()),
+            ("fixed_duration", args.duration.is_some().into()),
+        ],
+    );
     println!("recording to {}", handle.out_dir().display());
 
     match args.duration {
@@ -110,7 +215,14 @@ fn record(args: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let meta = handle.stop()?;
+    let meta = match handle.stop() {
+        Ok(meta) => meta,
+        Err(e) => {
+            report_failure(telemetry, "stop", &e);
+            return Err(e.into());
+        }
+    };
+    telemetry.track(events::RECORDING_COMPLETED, &events::recording_props(&meta));
 
     println!("\nwrote {:.1}s", meta.duration_secs());
     if let Some(mic) = &meta.mic {
@@ -124,6 +236,21 @@ fn record(args: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Mirror of `ui::App::report_recording_failure`.
+///
+/// Same rule: `kind` and `cpal_kind`, never `to_string()`. The `Display` impl
+/// names the device, which is the one thing that must not be sent.
+fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture::CaptureError) {
+    let props: Vec<crate::telemetry::Prop> = vec![
+        ("phase", phase.into()),
+        ("error_kind", e.kind().into()),
+        ("cpal_kind", e.cpal_kind().into()),
+        ("permission_shaped", e.is_permission_shaped().into()),
+    ];
+    telemetry.track(events::RECORDING_FAILED, &props);
+    telemetry.report_error(e.kind(), e.cpal_kind(), &props);
 }
 
 fn report_track(label: &str, track: &audio::meta::TrackInfo) {
@@ -140,8 +267,44 @@ fn report_track(label: &str, track: &audio::meta::TrackInfo) {
     }
 }
 
-fn list_devices() -> Result<(), Box<dyn std::error::Error>> {
-    let devices = audio::devices::list_devices()?;
+fn list_devices(telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+    let devices = match audio::devices::list_devices() {
+        Ok(devices) => devices,
+        Err(e) => {
+            telemetry.track(
+                events::DEVICE_LIST_FAILED,
+                &[("error_kind", e.kind().into())],
+            );
+            return Err(e.into());
+        }
+    };
+
+    telemetry.track(
+        events::DEVICES_REFRESHED,
+        &[
+            ("total", devices.len().into()),
+            (
+                "input_capable",
+                devices
+                    .iter()
+                    .filter(|(_, i)| i.supports_input)
+                    .count()
+                    .into(),
+            ),
+            (
+                "loopback_capable",
+                devices
+                    .iter()
+                    .filter(|(_, i)| i.can_loopback())
+                    .count()
+                    .into(),
+            ),
+            (
+                "has_default_output",
+                devices.iter().any(|(_, i)| i.is_default_output).into(),
+            ),
+        ],
+    );
 
     println!(
         "{:<38} {:<9} {:<5} {:<5} {:<9} FLAGS",

@@ -148,6 +148,62 @@ impl std::fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
+impl CaptureError {
+    /// A stable, PII-free name for this failure.
+    ///
+    /// `Display` is written for a human staring at the settings pane, so it
+    /// embeds device names and ids — and a device name is routinely a person's
+    /// name ("Nick's AirPods"). Anything that leaves the machine, which today
+    /// means telemetry, must use this instead of `to_string()`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Stream { .. } => "stream",
+            Self::Cpal(_) => "cpal",
+            Self::Wav(_) => "wav",
+            Self::Io(_) => "io",
+            Self::NoSuchDevice(_) => "no_such_device",
+            Self::NoInputDevice => "no_input_device",
+            Self::NoOutputDevice => "no_output_device",
+            Self::DuplexSystemDevice { .. } => "duplex_system_device",
+            Self::UnsupportedSampleFormat(_) => "unsupported_sample_format",
+            Self::WriterPanicked => "writer_panicked",
+        }
+    }
+
+    /// The underlying cpal classification, where there is one.
+    ///
+    /// Separate from [`kind`](Self::kind) because it is the field that
+    /// distinguishes "the user denied the microphone prompt" from "the device
+    /// vanished", which is the single most useful thing to know in aggregate.
+    pub fn cpal_kind(&self) -> Option<&'static str> {
+        let kind = match self {
+            Self::Stream { err, .. } | Self::Cpal(err) => err.kind(),
+            _ => return None,
+        };
+
+        Some(match kind {
+            cpal::ErrorKind::PermissionDenied => "permission_denied",
+            cpal::ErrorKind::DeviceNotAvailable => "device_not_available",
+            cpal::ErrorKind::UnsupportedOperation => "unsupported_operation",
+            cpal::ErrorKind::BackendError => "backend_error",
+            // cpal may add variants; an unrecognised one is still worth
+            // counting, just not worth guessing a name for.
+            _ => "other",
+        })
+    }
+
+    /// Whether this failure looks like the OS refusing access.
+    ///
+    /// The headline number for a recorder: a denied TCC prompt produces a file
+    /// full of silence, which users report as "it didn't work".
+    pub fn is_permission_shaped(&self) -> bool {
+        match self {
+            Self::Stream { err, .. } | Self::Cpal(err) => permission_shaped(err.kind()),
+            _ => false,
+        }
+    }
+}
+
 /// Error kinds that plausibly mean "the OS refused access".
 ///
 /// `PermissionDenied` is the honest one, but a TCC prompt that is dismissed or
@@ -308,4 +364,62 @@ where
         None,
     )?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason `kind` exists. `Display` leaks the device name by design —
+    /// it is remediation text — so the guarantee worth pinning down is that the
+    /// telemetry-facing accessors do not.
+    #[test]
+    fn kind_never_echoes_the_device_name() {
+        let name = "Nick's AirPods";
+
+        for err in [
+            CaptureError::DuplexSystemDevice { name: name.into() },
+            CaptureError::NoSuchDevice(name.into()),
+        ] {
+            assert!(
+                err.to_string().contains(name),
+                "precondition: Display is expected to name the device"
+            );
+            assert!(!err.kind().contains("AirPods"));
+            assert!(!err.kind().contains("Nick"));
+            assert_eq!(err.cpal_kind(), None);
+        }
+    }
+
+    #[test]
+    fn kinds_are_distinct_and_snake_case() {
+        let kinds = [
+            CaptureError::NoInputDevice.kind(),
+            CaptureError::NoOutputDevice.kind(),
+            CaptureError::WriterPanicked.kind(),
+            CaptureError::NoSuchDevice(String::new()).kind(),
+            CaptureError::DuplexSystemDevice {
+                name: String::new(),
+            }
+            .kind(),
+        ];
+
+        let mut seen = kinds.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), kinds.len(), "kinds must be distinguishable");
+
+        for kind in kinds {
+            assert!(
+                kind.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{kind} is not snake_case"
+            );
+        }
+    }
+
+    #[test]
+    fn non_cpal_errors_are_not_permission_shaped() {
+        assert!(!CaptureError::WriterPanicked.is_permission_shaped());
+        assert!(!CaptureError::NoInputDevice.is_permission_shaped());
+    }
 }

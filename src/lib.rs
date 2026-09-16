@@ -6,10 +6,15 @@
 //! directory is legal but confuses tooling, and forces intra-project imports to
 //! go through the crate name instead of `crate::`.
 //!
-//! `audio` is unconditional; the two front ends are feature-gated so a
-//! `--no-default-features --features cli` build never compiles the GUI stack.
+//! `audio`, `config` and `telemetry` are unconditional; the two front ends are
+//! feature-gated so a `--no-default-features --features cli` build never
+//! compiles the GUI stack. `telemetry` is unconditional only in the sense that
+//! the module always exists — without the `telemetry` feature it is an inert
+//! shim with no network dependency behind it.
 
 pub mod audio;
+pub mod config;
+pub mod telemetry;
 
 #[cfg(feature = "cli")]
 pub mod cli;

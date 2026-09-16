@@ -43,6 +43,7 @@ docker run --rm -t \
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
       pkg-config clang libclang-dev \
+      cmake \
       libpipewire-0.3-dev libspa-0.2-dev \
       libasound2-dev \
       libgtk-3-dev libayatana-appindicator3-dev \
