@@ -92,10 +92,10 @@ sequenceDiagram
     participant T as tray
 
     OS->>M: launch (from Jotter.app)
-    M->>M: icon_path()
-    Note right of M: Contents/Resources/icon.png,<br/>falling back to assets/ for cargo run —<br/>a bundle's cwd is /
-    M->>R: run(icon, options)
-    R->>T: build_tray(load_icon(..))
+    M->>R: run(options)
+    R->>T: build_tray(load_icon())
+    Note right of T: assets/icon.png is include_bytes!'d —<br/>no runtime path to guess, which is what<br/>broke the tray on a Linux install
+
     T-->>R: Tray { _icon, record_item }
     R->>A: App::new(tray)
     A->>A: refresh_devices()

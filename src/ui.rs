@@ -462,25 +462,6 @@ impl eframe::App for App {
     }
 }
 
-/// Locate the tray icon.
-///
-/// Inside a .app the working directory is not the repo root, so a bare
-/// relative path fails — and the app must run from the bundle, since that is
-/// the only way macOS will grant it audio permissions. Prefer the bundle's
-/// Resources directory and fall back to the repo layout for `cargo run`.
-fn icon_path() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        // .../Jotter.app/Contents/MacOS/jotter -> .../Contents/Resources/icon.png
-        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
-            let bundled = contents.join("Resources/icon.png");
-            if bundled.is_file() {
-                return bundled;
-            }
-        }
-    }
-    PathBuf::from("assets/icon.png")
-}
-
 /// Launch the tray app. Blocks until the user quits.
 ///
 /// eframe's types stay inside this module on purpose: `src/main.rs` is shared
@@ -500,13 +481,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = Settings::load();
     let telemetry = Telemetry::init(Surface::Gui, &mut settings);
 
-    let icon = icon_path();
     let app_telemetry = telemetry.clone();
     let result = eframe::run_native(
         "Jotter",
         native_options,
         Box::new(move |_cc| {
-            let tray = tray::build_tray(tray::load_icon(&icon));
+            let tray = tray::build_tray(tray::load_icon());
             Ok(Box::new(App::new(tray, settings, app_telemetry)))
         }),
     );

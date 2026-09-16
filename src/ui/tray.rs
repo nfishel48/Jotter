@@ -99,10 +99,38 @@ pub fn build_tray(icon: Icon) -> Tray {
     }
 }
 
-pub fn load_icon(path: &std::path::Path) -> Icon {
-    let image = image::open(path)
-        .expect("failed to open icon path")
+/// The tray icon, compiled into the binary.
+///
+/// Embedded rather than read from disk because there is no layout that finds it
+/// on every platform: a macOS .app has it in Contents/Resources, a Linux
+/// install has the binary in /usr/bin with the asset somewhere else entirely,
+/// and a bare `cargo run` has only the repo. Reading it at runtime meant the
+/// tray panicked wherever the guess was wrong.
+const ICON_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+
+pub fn load_icon() -> Icon {
+    // Both expects are unreachable unless assets/icon.png is itself broken,
+    // which `cargo build` would have to have accepted first.
+    let image = image::load_from_memory(ICON_PNG)
+        .expect("failed to decode embedded icon")
         .into_rgba8();
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height).expect("failed to create icon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `load_icon` is otherwise only reachable from a running tray, so a broken
+    /// or truncated asset would surface as a panic at launch on a user's
+    /// machine rather than in CI.
+    #[test]
+    fn embedded_icon_decodes() {
+        let image = image::load_from_memory(ICON_PNG)
+            .expect("embedded icon is not a decodable image")
+            .into_rgba8();
+        assert_eq!(image.dimensions(), (64, 64));
+        assert!(Icon::from_rgba(image.into_raw(), 64, 64).is_ok());
+    }
 }
