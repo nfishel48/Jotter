@@ -2877,6 +2877,7 @@ dependencies = [
 name = "jotter"
 version = "0.1.5"
 dependencies = [
+ "cc",
  "chrono",
  "clap",
  "cpal",

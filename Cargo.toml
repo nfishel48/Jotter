@@ -12,7 +12,7 @@ name = "jotter"
 path = "src/main.rs"
 
 [features]
-default = ["gui", "cli", "telemetry"]
+default = ["gui", "cli", "telemetry", "aec"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
 # gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
 gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
@@ -23,6 +23,12 @@ cli = ["dep:clap"]
 # a distro or fork rebuild can produce a provably offline binary. Everything in
 # `src/telemetry` has a no-op shim, so no call site is `cfg`-gated.
 telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
+# Offline echo cancellation: removing speaker bleed from the mic track after a
+# recording ends. Off means no C compiler is needed to build jotter at all —
+# `build.rs` returns immediately — which is the same guarantee `telemetry` gives
+# for the network stack. The canceller is vendored Speex C; see
+# `src/audio/aec/vendor/README.md` for why it is vendored rather than a dependency.
+aec = []
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
@@ -57,6 +63,20 @@ tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 # The install id. v4 only: it must be random, not derived from anything about
 # the machine.
 uuid = { version = "1", features = ["v4"], optional = true }
+
+[build-dependencies]
+# Compiles the vendored Speex echo canceller. The right tool rather than a system
+# library or meson: it derives `-arch`/`--target` from Cargo's target triple,
+# which is what keeps the universal-binary release in release.yml working.
+#
+# Not optional, and it cannot be: Cargo passes features to a build script as
+# `CARGO_FEATURE_*` environment variables, never as `cfg(feature = ...)`, so
+# `build.rs` cannot conditionally reference an optional build dependency — the
+# path has to resolve even when the feature is off. `cc` is pure Rust and
+# compiling it needs no C toolchain; `build.rs` checks the environment variable
+# and returns before invoking a compiler, so an `aec`-less build still never
+# needs one.
+cc = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds

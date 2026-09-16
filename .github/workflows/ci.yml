@@ -92,3 +92,10 @@ jobs:
           cargo check --locked --no-default-features --features cli,telemetry
           cargo check --locked --no-default-features --features gui,telemetry
           cargo check --locked --no-default-features --features gui,cli
+          # `aec` compiles vendored C. The leg that matters is the one *without*
+          # it: build.rs gates on CARGO_FEATURE_AEC rather than cfg(feature),
+          # because Cargo never passes features to a build script as cfg. Get
+          # that wrong and either the canceller silently never compiles, or a
+          # distro building without `aec` suddenly needs a C toolchain.
+          cargo check --locked --no-default-features --features cli,aec
+          cargo check --locked --no-default-features --features gui,aec

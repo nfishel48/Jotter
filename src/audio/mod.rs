@@ -6,6 +6,8 @@
 //! on an *output* device — cpal turns that into a loopback capture. See
 //! [`capture::open_loopback`] for why the choice of output device matters.
 
+#[cfg(feature = "aec")]
+pub mod aec;
 pub mod capture;
 pub mod devices;
 pub mod meta;
