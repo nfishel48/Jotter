@@ -12,12 +12,17 @@ name = "jotter"
 path = "src/main.rs"
 
 [features]
-default = ["gui", "cli"]
+default = ["gui", "cli", "telemetry"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
 # gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
 gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
 # The `record` / `devices` subcommands.
 cli = ["dep:clap"]
+# Anonymous usage and crash reporting. Off means the binary has no HTTP client
+# and no async runtime at all — the whole network stack is behind this flag, so
+# a distro or fork rebuild can produce a provably offline binary. Everything in
+# `src/telemetry` has a no-op shim, so no call site is `cfg`-gated.
+telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
@@ -40,6 +45,18 @@ image = { version = "0.25.10", optional = true }
 tray-icon = { version = "0.24.2", optional = true, default-features = false, features = [
   "gtk",
 ] }
+
+# Default features are what we want: `async-client` (+ tokio) and
+# `error-tracking`, which is what supplies the panic hook and the symbolicated
+# stack traces. Local flag evaluation is deliberately unused — it needs a
+# personal API key, and there is nowhere to hide one in an open-source binary.
+posthog-rs = { version = "0.25", optional = true }
+# Only the runtime; posthog-rs brings its own reqwest/hyper stack. One worker
+# thread is plenty for a handful of events per session.
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+# The install id. v4 only: it must be random, not derived from anything about
+# the machine.
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds

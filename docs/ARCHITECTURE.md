@@ -3,7 +3,8 @@
 How the app is put together and how audio data moves through it.
 
 For the macOS permission story, the cpal loopback mechanics and the debug
-scripts, see [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md).
+scripts, see [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md). For exactly what the app
+reports and how to turn it off, see [TELEMETRY.md](TELEMETRY.md).
 
 ---
 
@@ -21,7 +22,7 @@ graph TB
     end
 
     subgraph cli["cli — command line"]
-        CLIMOD["cli.rs<br/><b>record</b> / <b>devices</b>"]
+        CLIMOD["cli.rs<br/><b>record</b> / <b>devices</b> / <b>telemetry</b>"]
     end
 
     subgraph ui["ui — presentation, main thread"]
@@ -359,7 +360,51 @@ explicitly rather than trusting the happy path.
 | `audio/writer.rs` | `TrackWriter` / `TrackSink`, the realtime→writer boundary, format conversion |
 | `audio/meta.rs` | `Meta`, `TrackInfo`, `track_offset_secs()`, `timestamp_dir_name()` |
 | `main.rs` | clap parsing and the GUI/CLI dispatch |
-| `cli.rs` | `record` / `devices` subcommands and their console output |
+| `cli.rs` | `record` / `devices` / `telemetry` subcommands and their console output |
 | `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |
 | `ui/tray.rs` | `Tray`, `MenuAction`, event draining |
-| `ui/settings.rs` | egui window, device pickers, status rendering |
+| `ui/settings.rs` | egui window, device pickers, status rendering, the privacy section |
+| `config.rs` | `Settings` — the only persisted preferences, and the telemetry opt-out |
+| `telemetry/mod.rs` | The `Telemetry` handle, and its no-op twin for builds without the feature |
+| `telemetry/worker.rs` | The one thread that does network I/O; PostHog client lifecycle |
+| `telemetry/events.rs` | Every event name, and the `Meta` → properties allowlist |
+| `telemetry/scrub.rs` | Home-directory redaction for payloads Jotter does not build itself |
+
+## Telemetry
+
+Anonymous usage and crash reporting via PostHog, behind the default-on
+`telemetry` feature. `docs/TELEMETRY.md` is the user-facing contract and lists
+every event; the notes here are the ones that constrain the code.
+
+Three properties the implementation is built to preserve:
+
+1. **`audio` still knows nothing about anything else.** The only change there is
+   `CaptureError::kind()`, a method on an existing enum. Instrumentation lives in
+   the front ends.
+2. **Nothing identifying can be sent by accident.** `Telemetry::track` takes
+   `&'static str` property values, so a device name or a path cannot reach it
+   without someone going well out of their way. `CaptureError`'s `Display` names
+   the device — that is what it is for — which is exactly why `kind()` exists.
+3. **Off means off.** The PostHog client is constructed lazily, on the first
+   transition to enabled. Opted out, there is no client, no flag polling, and no
+   socket. Jotter has no other use for the network.
+
+Three things that are easy to get wrong here:
+
+- **Every exit path must drain explicitly.** The tray's Quit calls
+  `process::exit`, which runs no destructors, so `Drop` is not a mechanism. See
+  `App::finish_session`.
+- **The realtime audio callback is never instrumented.** Allocating or locking on
+  that thread causes dropouts. `TrackInfo::stream_errors` is already an atomic
+  counter; it is reported at `stop`.
+- **`init_global` must come before any network call in `worker::start`.** It is
+  what installs the panic hook, and every panic in this app is in tray
+  construction, milliseconds after launch. An earlier version evaluated feature
+  flags first, putting a full HTTP round trip in front of the hook; a forced
+  panic at `ui/tray.rs:104` was then lost entirely, and captured once the order
+  was flipped. Both states were confirmed against a live project, so this is a
+  measurement rather than a theory. Flag evaluation is deliberately second.
+
+macOS builds are ad-hoc codesigned with no App Sandbox, so outbound HTTPS needs
+no entitlement and no ATS exception. Mac App Store distribution would later
+require `com.apple.security.network.client`.

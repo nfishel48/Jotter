@@ -86,12 +86,14 @@ jobs:
         with:
           key: release-${{ matrix.os }}
 
+      # Mirrors ci.yml. cmake is for aws-lc-sys, which builds a C crypto library
+      # and arrives via posthog-rs -> reqwest -> rustls.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config clang libclang-dev \
+            pkg-config clang libclang-dev cmake \
             libpipewire-0.3-dev libspa-0.2-dev \
             libasound2-dev \
             libgtk-3-dev libayatana-appindicator3-dev \
@@ -104,6 +106,12 @@ jobs:
         if: runner.os == 'macOS'
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          # A repo *variable*, not a secret. PostHog project tokens are
+          # write-only and public by design — every site running PostHog serves
+          # one in its page source — so there is nothing to protect, and a
+          # secret would additionally be unavailable to fork PRs. Unset simply
+          # builds a binary that sends nothing, which is what a fork should get.
+          JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -128,6 +136,8 @@ jobs:
         if: runner.os == 'Linux'
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          # See the macOS step for why this is a variable rather than a secret.
+          JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
           cargo build --release --locked --bin jotter

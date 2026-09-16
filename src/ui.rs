@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::audio::{self, RecordConfig, Sources, devices::DeviceChoice};
+use crate::config::Settings;
+use crate::telemetry::{Surface, Telemetry, events};
 
 use tray::MenuAction;
 
@@ -28,10 +30,22 @@ pub struct App {
     mic_sel: Option<String>,
     system_sel: Option<String>,
     status: settings::Status,
+    settings: Settings,
+    telemetry: Telemetry,
+    /// For `app_exited`'s session length. `Instant` rather than wall clock
+    /// because it is a duration, and the clock can jump.
+    started: Instant,
+    recordings_this_session: u32,
 }
 
 impl App {
-    fn new(tray: tray::Tray) -> Self {
+    /// Settings and telemetry are constructed in [`run`] and handed in, rather
+    /// than loaded here: `eframe::run_native` only calls this once the window
+    /// exists, and a launch that never gets that far is exactly the failure
+    /// worth hearing about.
+    fn new(tray: tray::Tray, settings: Settings, telemetry: Telemetry) -> Self {
+        let first_run = !settings.telemetry_notice_seen;
+
         let mut app = Self {
             tray,
             recording: None,
@@ -39,9 +53,59 @@ impl App {
             mic_sel: None,
             system_sel: None,
             status: settings::Status::Idle,
+            settings,
+            telemetry,
+            started: Instant::now(),
+            recordings_this_session: 0,
         };
         app.refresh_devices();
+
+        // After `refresh_devices`, so the device summary is already known: the
+        // most useful thing about a launch is what hardware it found.
+        app.telemetry.track(
+            events::APP_STARTED,
+            &[
+                ("is_first_run", first_run.into()),
+                ("has_loopback_device", app.has_loopback_device().into()),
+                ("device_count", app.devices.len().into()),
+            ],
+        );
+
         app
+    }
+
+    fn has_loopback_device(&self) -> bool {
+        self.devices.iter().any(|d| d.can_loopback)
+    }
+
+    /// Device counts, as shapes rather than names.
+    ///
+    /// Device names are personal — "Nick's AirPods" is the normal case, not the
+    /// exception — so only the counts leave the machine.
+    fn device_props(&self) -> Vec<crate::telemetry::Prop> {
+        vec![
+            ("total", self.devices.len().into()),
+            (
+                "input_capable",
+                self.devices
+                    .iter()
+                    .filter(|d| d.supports_input)
+                    .count()
+                    .into(),
+            ),
+            (
+                "loopback_capable",
+                self.devices
+                    .iter()
+                    .filter(|d| d.can_loopback)
+                    .count()
+                    .into(),
+            ),
+            (
+                "has_default_output",
+                self.devices.iter().any(|d| d.is_default_output).into(),
+            ),
+        ]
     }
 
     fn refresh_devices(&mut self) {
@@ -58,8 +122,18 @@ impl App {
                         is_default_output: info.is_default_output,
                     })
                     .collect();
+                self.telemetry
+                    .track(events::DEVICES_REFRESHED, &self.device_props());
             }
-            Err(e) => self.status = settings::Status::Error(format!("device list failed: {e}")),
+            Err(e) => {
+                // Recoverable — the app keeps running with a stale list — so
+                // this is reported as an event rather than an exception.
+                self.telemetry.track(
+                    events::DEVICE_LIST_FAILED,
+                    &[("error_kind", e.kind().into())],
+                );
+                self.status = settings::Status::Error(format!("device list failed: {e}"));
+            }
         }
     }
 
@@ -87,8 +161,18 @@ impl App {
                 });
                 self.status = settings::Status::Recording;
                 self.tray.set_recording(true);
+
+                self.telemetry.track(
+                    events::RECORDING_STARTED,
+                    &[
+                        ("mic_is_default", self.mic_sel.is_none().into()),
+                        ("system_is_default", self.system_sel.is_none().into()),
+                        ("has_loopback_device", self.has_loopback_device().into()),
+                    ],
+                );
             }
             Err(e) => {
+                self.report_recording_failure("start", &e);
                 // Surfaced in full rather than summarised: the failures that
                 // matter here (duplex device, permission denial) each carry
                 // their own remedy in the message.
@@ -104,12 +188,38 @@ impl App {
         };
         self.tray.set_recording(false);
         self.status = match active.handle.stop() {
-            Ok(meta) => settings::Status::Finished {
-                dir: active.dir,
-                meta: Box::new(meta),
-            },
-            Err(e) => settings::Status::Error(e.to_string()),
+            Ok(meta) => {
+                self.recordings_this_session += 1;
+                self.telemetry
+                    .track(events::RECORDING_COMPLETED, &events::recording_props(&meta));
+                settings::Status::Finished {
+                    dir: active.dir,
+                    meta: Box::new(meta),
+                }
+            }
+            Err(e) => {
+                self.report_recording_failure("stop", &e);
+                settings::Status::Error(e.to_string())
+            }
         };
+    }
+
+    /// Report a capture failure as both an event and an exception.
+    ///
+    /// Note what is *not* passed: `e.to_string()`. The `Display` impl embeds the
+    /// device name and is written for the settings pane; `kind` and `cpal_kind`
+    /// are the `&'static str` classifications meant to leave the machine.
+    fn report_recording_failure(&self, phase: &'static str, e: &audio::capture::CaptureError) {
+        let props: Vec<crate::telemetry::Prop> = vec![
+            ("phase", phase.into()),
+            ("error_kind", e.kind().into()),
+            ("cpal_kind", e.cpal_kind().into()),
+            ("permission_shaped", e.is_permission_shaped().into()),
+            ("has_loopback_device", self.has_loopback_device().into()),
+        ];
+
+        self.telemetry.track(events::RECORDING_FAILED, &props);
+        self.telemetry.report_error(e.kind(), e.cpal_kind(), &props);
     }
 
     fn toggle_recording(&mut self) {
@@ -127,20 +237,88 @@ impl App {
     /// Poll the tray channels and act on whatever arrived.
     fn pump_tray(&mut self, ctx: &egui::Context) {
         if tray::handle_icon_events() {
+            self.telemetry
+                .track(events::SETTINGS_OPENED, &[("trigger", "tray_icon".into())]);
             show_window(ctx);
         }
 
         for action in tray::handle_menu_events() {
+            self.telemetry.track(
+                events::TRAY_MENU_CLICKED,
+                &[("id", action.telemetry_id().into())],
+            );
+
             match action {
                 MenuAction::ToggleRecord => self.toggle_recording(),
-                MenuAction::ShowSettings => show_window(ctx),
+                MenuAction::ShowSettings => {
+                    self.telemetry
+                        .track(events::SETTINGS_OPENED, &[("trigger", "tray_menu".into())]);
+                    show_window(ctx);
+                }
                 MenuAction::Quit => {
                     // Stop first: dropping the process mid-stream leaves an
                     // unfinalized WAV with a placeholder RIFF header.
                     self.stop_recording();
+                    // `process::exit` runs no destructors, so nothing else gets
+                    // a chance — not `on_exit`, not `Drop`. Every buffered event
+                    // would be lost here without an explicit drain.
+                    self.finish_session("tray_quit");
                     std::process::exit(0);
                 }
             }
+        }
+    }
+
+    /// Record the end of the session and drain the telemetry queue.
+    ///
+    /// Bounded internally, so a dead network cannot hang a quit.
+    fn finish_session(&mut self, reason: &'static str) {
+        self.telemetry.track(
+            events::APP_EXITED,
+            &[
+                ("reason", reason.into()),
+                ("session_secs", self.started.elapsed().as_secs().into()),
+                (
+                    "recordings_this_session",
+                    self.recordings_this_session.into(),
+                ),
+            ],
+        );
+        self.telemetry.shutdown();
+    }
+
+    /// Persist and apply a change to the telemetry preference.
+    fn set_telemetry(&mut self, on: bool) {
+        if on {
+            // Order matters in both directions: opting in must reach the worker
+            // before the event, or the event is dropped by the gate...
+            self.telemetry.set_enabled(true);
+            self.settings.telemetry_enabled = true;
+            self.telemetry.track(events::TELEMETRY_OPTED_IN, &[]);
+        } else {
+            // ...and opting out must send the event first, for the same reason.
+            // This is the last thing this install will send.
+            self.telemetry.track(events::TELEMETRY_OPTED_OUT, &[]);
+            self.telemetry.set_enabled(false);
+            self.settings.telemetry_enabled = false;
+        }
+
+        self.persist_settings();
+    }
+
+    fn persist_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            // Worth surfacing: silently failing to persist an opt-out would mean
+            // the box quietly unticks itself on the next launch.
+            self.status = settings::Status::Error(format!("could not save settings: {e}"));
+        }
+    }
+
+    fn telemetry_view(&self) -> settings::TelemetryView {
+        settings::TelemetryView {
+            enabled: self.settings.telemetry_enabled,
+            show_notice: !self.settings.telemetry_notice_seen,
+            available: self.telemetry.is_configured(),
         }
     }
 }
@@ -226,11 +404,15 @@ impl eframe::App for App {
     /// of a meeting would be unreadable.
     fn on_exit(&mut self) {
         self.stop_recording();
+        // The Cmd-Q path. The tray's Quit does this for itself, because
+        // `process::exit` never reaches here.
+        self.finish_session("window_quit");
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        let telemetry_view = self.telemetry_view();
         let action = settings::draw(
             ui,
             settings::View {
@@ -241,13 +423,33 @@ impl eframe::App for App {
                 system_sel: &mut self.system_sel,
                 status: &self.status,
                 root: &recordings_root(),
+                telemetry: telemetry_view,
             },
         );
 
         match action {
             Some(settings::Action::Toggle) => self.toggle_recording(),
             Some(settings::Action::RefreshDevices) => self.refresh_devices(),
-            Some(settings::Action::Reveal(path)) => reveal_in_file_manager(&path),
+            Some(settings::Action::Reveal(path)) => {
+                // Distinguishes the always-present button from the link on a
+                // just-finished recording: the second means the recording is
+                // being used, the first only that it was looked for.
+                let source = if path == recordings_root() {
+                    "button"
+                } else {
+                    "saved_link"
+                };
+                self.telemetry.track(
+                    events::RECORDINGS_FOLDER_OPENED,
+                    &[("source", source.into())],
+                );
+                reveal_in_file_manager(&path);
+            }
+            Some(settings::Action::SetTelemetry(on)) => self.set_telemetry(on),
+            Some(settings::Action::DismissTelemetryNotice) => {
+                self.settings.telemetry_notice_seen = true;
+                self.persist_settings();
+            }
             None => {}
         }
 
@@ -295,15 +497,30 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_visible(true)
         .with_inner_size([420.0, 380.0]);
 
+    let mut settings = Settings::load();
+    let telemetry = Telemetry::init(Surface::Gui, &mut settings);
+
     let icon = icon_path();
-    eframe::run_native(
+    let app_telemetry = telemetry.clone();
+    let result = eframe::run_native(
         "Jotter",
         native_options,
         Box::new(move |_cc| {
             let tray = tray::build_tray(tray::load_icon(&icon));
-            Ok(Box::new(App::new(tray)))
+            Ok(Box::new(App::new(tray, settings, app_telemetry)))
         }),
-    )?;
+    );
 
+    if result.is_err() {
+        // The window never opened, so `App` — and with it `on_exit` — never
+        // existed. On Linux this is the GPU/Wayland class of bug report, and it
+        // is otherwise entirely invisible to us. The error itself stays here:
+        // eframe's message can name a display or a device path.
+        telemetry.track(events::APP_STARTED, &[("launch_failed", true.into())]);
+        telemetry.report_error("eframe_launch_failed", None, &[]);
+    }
+    telemetry.shutdown();
+
+    result?;
     Ok(())
 }

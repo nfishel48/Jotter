@@ -18,6 +18,11 @@ binary: code that only compiles with both features on builds fine by default and
 breaks nobody's machine until someone builds CLI-only. With `-D warnings`, an
 import left unused under one feature fails the job.
 
+`telemetry` is in the matrix for a sharper version of the same reason. It ships
+two implementations of one type — the real handle and a no-op shim — so that no
+call site needs a `cfg`. Nothing but a build without the feature will notice if
+their signatures drift, and the only people who build that way are packagers.
+
 ### What the tests cover, and why so narrowly
 
 CI runners are headless with no audio devices, so the suite covers **pure logic
@@ -36,7 +41,10 @@ hand it a duplex device and it silently records the microphone into
 cargo fmt --all --check && cargo clippy --all-targets --locked \
   && cargo test --all-targets --locked && cargo build --locked \
   && cargo check --locked --no-default-features --features cli \
-  && cargo check --locked --no-default-features --features gui
+  && cargo check --locked --no-default-features --features gui \
+  && cargo check --locked --no-default-features --features cli,telemetry \
+  && cargo check --locked --no-default-features --features gui,telemetry \
+  && cargo check --locked --no-default-features --features gui,cli
 
 scripts/check_linux_build.sh ci   # the Linux half, in a container
 ```
@@ -107,6 +115,22 @@ would look like it worked and record nothing. `bundle.sh` reads the version from
 
 A universal binary rather than two downloads, so users never have to work out
 which Mac they have.
+
+### Build-time configuration
+
+Both build steps read `JOTTER_POSTHOG_KEY` from a repo **variable**, not a
+secret. PostHog project tokens are write-only and public by design — every site
+running PostHog serves one in its page source — so there is nothing to protect,
+and making it a secret would only break fork PRs, where secrets are unavailable.
+
+It is the one `option_env!` in the codebase. Unset, telemetry compiles in but
+stays inert, which is exactly what a fork or a local `cargo build` should get.
+Set it in Settings → Secrets and variables → Actions → Variables. See
+`docs/TELEMETRY.md`.
+
+Note for future packaging: outbound HTTPS needs no macOS entitlement today
+because the bundle is ad-hoc signed with no App Sandbox. Mac App Store
+distribution would require `com.apple.security.network.client`.
 
 ## Known limitations
 

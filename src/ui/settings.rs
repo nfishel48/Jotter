@@ -26,6 +26,13 @@ pub enum Action {
     Toggle,
     RefreshDevices,
     Reveal(PathBuf),
+    /// The user ticked or unticked the telemetry checkbox.
+    ///
+    /// An `Action` rather than a `&mut bool` through `View` — unlike the device
+    /// pickers, this has to be written to disk and pushed to the telemetry
+    /// worker, and those belong to `App`, not to a widget.
+    SetTelemetry(bool),
+    DismissTelemetryNotice,
 }
 
 pub struct View<'a> {
@@ -38,91 +45,172 @@ pub struct View<'a> {
     /// Root recordings folder, shown so the files are findable without
     /// hunting — the reason they moved out of Application Support.
     pub root: &'a Path,
+    pub telemetry: TelemetryView,
+}
+
+/// Everything the privacy section needs to render.
+#[derive(Clone, Copy)]
+pub struct TelemetryView {
+    /// The stored preference — what the checkbox shows.
+    pub enabled: bool,
+    /// Whether the first-run notice is still pending.
+    pub show_notice: bool,
+    /// Whether this build can collect anything at all. False for any build
+    /// without an API key or without the `telemetry` feature, in which case the
+    /// checkbox is shown disabled rather than hidden: a privacy control that
+    /// vanishes is more unsettling than one that is visibly inapplicable.
+    pub available: bool,
 }
 
 pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     let mut action = None;
 
     egui::CentralPanel::default().show(ui, |ui| {
-        ui.heading("Jotter");
-        ui.add_space(4.0);
-
-        ui.horizontal(|ui| {
-            let label = if view.recording {
-                "Stop Recording"
-            } else {
-                "Start Recording"
-            };
-            if ui.button(label).clicked() {
-                action = Some(Action::Toggle);
-            }
-
-            if let Some(elapsed) = view.elapsed {
-                let secs = elapsed.as_secs();
-                ui.label(format!("● {:02}:{:02}", secs / 60, secs % 60));
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        // Devices cannot be changed underneath a running stream, so the
-        // pickers are locked while recording rather than silently ignored.
-        ui.add_enabled_ui(!view.recording, |ui| {
-            device_picker(
-                ui,
-                "Microphone",
-                view.mic_sel,
-                view.devices,
-                |d| d.supports_input,
-                |d| d.is_default_input,
-            );
-
-            device_picker(
-                ui,
-                "System audio",
-                view.system_sel,
-                view.devices,
-                |d| d.can_loopback,
-                |d| d.is_default_output,
-            );
-
-            if ui.button("Refresh devices").clicked() {
-                action = Some(Action::RefreshDevices);
-            }
-        });
-
-        if !view.devices.iter().any(|d| d.can_loopback) {
+        // Scrollable because the privacy section is last and `CaptureError`'s
+        // messages are several lines of remediation text. Without this, a failed
+        // recording pushes the telemetry opt-out below the bottom of a 380px
+        // window — putting the control out of reach exactly when the app has
+        // just gone wrong, which is when someone is most likely to want it.
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Jotter");
             ui.add_space(4.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(200, 120, 0),
-                "No output-only device found. cpal can only tap system audio on a \
+
+            ui.horizontal(|ui| {
+                let label = if view.recording {
+                    "Stop Recording"
+                } else {
+                    "Start Recording"
+                };
+                if ui.button(label).clicked() {
+                    action = Some(Action::Toggle);
+                }
+
+                if let Some(elapsed) = view.elapsed {
+                    let secs = elapsed.as_secs();
+                    ui.label(format!("● {:02}:{:02}", secs / 60, secs % 60));
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Devices cannot be changed underneath a running stream, so the
+            // pickers are locked while recording rather than silently ignored.
+            ui.add_enabled_ui(!view.recording, |ui| {
+                device_picker(
+                    ui,
+                    "Microphone",
+                    view.mic_sel,
+                    view.devices,
+                    |d| d.supports_input,
+                    |d| d.is_default_input,
+                );
+
+                device_picker(
+                    ui,
+                    "System audio",
+                    view.system_sel,
+                    view.devices,
+                    |d| d.can_loopback,
+                    |d| d.is_default_output,
+                );
+
+                if ui.button("Refresh devices").clicked() {
+                    action = Some(Action::RefreshDevices);
+                }
+            });
+
+            if !view.devices.iter().any(|d| d.can_loopback) {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 120, 0),
+                    "No output-only device found. cpal can only tap system audio on a \
                  device that reports no input, so recording would capture a \
                  microphone instead.",
-            );
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        if let Some(revealed) = status(ui, view.status) {
-            action = Some(Action::Reveal(revealed));
-        }
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button("Open recordings folder").clicked() {
-                action = Some(Action::Reveal(view.root.to_path_buf()));
+                );
             }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            if let Some(revealed) = status(ui, view.status) {
+                action = Some(Action::Reveal(revealed));
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open recordings folder").clicked() {
+                    action = Some(Action::Reveal(view.root.to_path_buf()));
+                }
+                ui.label(
+                    egui::RichText::new(view.root.display().to_string())
+                        .small()
+                        .weak(),
+                );
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            if let Some(privacy) = privacy(ui, view.telemetry) {
+                action = Some(privacy);
+            }
+        });
+    });
+
+    action
+}
+
+/// The telemetry notice and opt-out.
+///
+/// Placed last: it is a thing you go looking for once, not something to put
+/// between the user and the record button.
+fn privacy(ui: &mut egui::Ui, view: TelemetryView) -> Option<Action> {
+    let mut action = None;
+
+    if view.show_notice && view.available {
+        // A frame rather than a plain label so first-run text reads as a notice
+        // to acknowledge, not as more settings chrome to skim past.
+        egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(
-                egui::RichText::new(view.root.display().to_string())
+                "Jotter sends anonymous usage and crash reports, which is how recording \
+                 failures get found and fixed.",
+            );
+            ui.label(
+                egui::RichText::new("Never audio, file names, folder names, or device names.")
                     .small()
                     .weak(),
             );
+            if ui.button("Got it").clicked() {
+                action = Some(Action::DismissTelemetryNotice);
+            }
         });
+        ui.add_space(4.0);
+    }
+
+    ui.add_enabled_ui(view.available, |ui| {
+        let mut enabled = view.enabled;
+        if ui
+            .checkbox(&mut enabled, "Send anonymous usage and crash reports")
+            .changed()
+        {
+            action = Some(Action::SetTelemetry(enabled));
+        }
     });
+
+    let detail = if view.available {
+        "App version, OS, how long recordings run, and whether a track captured \
+         audio. Never audio, file names, or device names."
+    } else {
+        // Either built without the `telemetry` feature or without an API key —
+        // a self-built or packaged binary. Say so, rather than showing a dead
+        // checkbox with no explanation.
+        "This build has telemetry compiled out and sends nothing."
+    };
+    ui.label(egui::RichText::new(detail).small().weak());
 
     action
 }
