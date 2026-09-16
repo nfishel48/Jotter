@@ -237,6 +237,7 @@ mod tests {
             ended_at: 125.0,
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
+            aec: None,
         };
 
         let props = recording_props(&meta);
@@ -258,6 +259,7 @@ mod tests {
             ended_at: 125.0,
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
+            aec: None,
         };
 
         let props = recording_props(&meta);
@@ -285,6 +287,7 @@ mod tests {
             ended_at: 5.0,
             mic: Some(track("mic", 240_000)),
             system: None,
+            aec: None,
         };
 
         let props = recording_props(&meta);
