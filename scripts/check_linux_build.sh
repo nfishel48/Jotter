@@ -29,6 +29,10 @@ echo "==> cargo $CMD for x86_64-unknown-linux-gnu (pipewire feature enabled)"
 
 # Deps for: pipewire host, alsa fallback, eframe/wgpu (x11+wayland+xkb), and
 # tray-icon (gtk3 + libappindicator).
+#
+# The x11 packages are needed even for a Wayland desktop: winit compiles both
+# backends and chooses at runtime, and gtk3 links X11 regardless. No libxdo-dev
+# — tray-icon's default `libxdo` feature is turned off in Cargo.toml.
 docker run --rm -t \
   -v "$ROOT":/src \
   -w /src \
@@ -41,7 +45,7 @@ docker run --rm -t \
       pkg-config clang libclang-dev \
       libpipewire-0.3-dev libspa-0.2-dev \
       libasound2-dev \
-      libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+      libgtk-3-dev libayatana-appindicator3-dev \
       libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
       libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
       >/dev/null 2>&1

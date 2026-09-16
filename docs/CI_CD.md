@@ -44,7 +44,10 @@ scripts/check_linux_build.sh ci   # the Linux half, in a container
 The Linux half genuinely cannot be checked from macOS with plain cargo — the
 `pipewire` and `alsa` `-sys` crates need Linux headers. Note that `ci` runs the
 full gate; plain `check` only type-checks and **does not link**, which is how a
-missing `libxdo-dev` went unnoticed until a real `cargo build`.
+missing system library goes unnoticed until a real `cargo build` — `tray-icon`'s
+`libxdo` was exactly this, a bare `cargo:rustc-link-lib=xdo` that only fails at
+the link step. It is no longer a dependency (see the note in `Cargo.toml`), but
+the lesson stands: type-checking the Linux build proves less than it looks.
 
 ## Release — `.github/workflows/release.yml`
 

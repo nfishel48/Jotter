@@ -33,7 +33,13 @@ clap = { version = "4.6", features = ["derive"], optional = true }
 eframe = { version = "0.36.1", optional = true }
 egui = { version = "0.36.1", optional = true }
 image = { version = "0.25.10", optional = true }
-tray-icon = { version = "0.24.2", optional = true }
+# default-features off to drop `libxdo`, which is otherwise a hard `-lxdo` link
+# on Linux. muda uses it only to synthesise X11 key events for predefined menu
+# items (Copy/Paste/…); our menu is custom items only. It is also useless on a
+# Wayland session, which cannot be driven by XTEST.
+tray-icon = { version = "0.24.2", optional = true, default-features = false, features = [
+  "gtk",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds

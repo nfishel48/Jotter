@@ -181,6 +181,18 @@ libx11-dev libxcursor-dev libxrandr-dev libxi-dev
 libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 ```
 
+This list is what CI installs; keep the two in step, since a package that is
+only in one of them shows up as a build that works in exactly one place.
+
+The X11 packages are required even on a Wayland desktop (Ubuntu's default since
+21.04). Which display server the *session* runs is a runtime choice; winit
+compiles its x11 and wayland backends both and selects at startup, and gtk3
+links X11 unconditionally. There is deliberately **no `libxdo-dev`**: `tray-icon`
+enables `libxdo` by default, but muda only uses it to synthesise X11 key events
+for predefined menu items (Copy/Paste/…), which this tray does not use and which
+could not work under Wayland anyway. `Cargo.toml` turns that feature off, so the
+bare `-lxdo` link it adds is gone.
+
 Differences from macOS:
 
 - **No bundle, no permissions dance.** Run `scripts/run_app.sh`, which builds
