@@ -197,15 +197,11 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
     action
 }
 
-/// The telemetry notice and opt-out.
-///
-/// Placed last: it is a thing you go looking for once, not something to put
-/// between the user and the record button.
 /// The echo-cancellation toggle.
 ///
 /// Worth spelling out in the UI that the original is untouched: "remove" sounds
 /// destructive, and someone recording a meeting they cannot re-record wants to
-/// know before ticking it.
+/// know that before they find out.
 fn processing(ui: &mut egui::Ui, view: AecView) -> Option<Action> {
     let mut action = None;
 
@@ -219,9 +215,9 @@ fn processing(ui: &mut egui::Ui, view: AecView) -> Option<Action> {
         }
 
         let detail = if view.available {
-            "Only matters on speakers — with headphones there is no echo to \
-             remove. Writes a second file; your original recording is never \
-             modified."
+            "On by default. Only matters on speakers — with headphones there is \
+             no echo to remove. Writes a second file; your original recording is \
+             never modified."
         } else {
             "This build was compiled without echo cancellation."
         };
@@ -231,6 +227,10 @@ fn processing(ui: &mut egui::Ui, view: AecView) -> Option<Action> {
     action
 }
 
+/// The telemetry notice and opt-out.
+///
+/// Placed last: it is a thing you go looking for once, not something to put
+/// between the user and the record button.
 fn privacy(ui: &mut egui::Ui, view: TelemetryView) -> Option<Action> {
     let mut action = None;
 

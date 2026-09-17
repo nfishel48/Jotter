@@ -276,8 +276,15 @@ jotter record --duration 600 --aec   # clean it as soon as recording stops
 scripts/check_aec.sh recordings/<dir># grade the result
 ```
 
-Off by default for now — see Known gaps. Enable it in the settings pane, with
-`--aec`, or by setting `aec_enabled` in the config file.
+**On by default.** Turn it off in the settings pane, with `--no-aec`, or by
+setting `aec_enabled` to `false` in the config file.
+
+Defaulting on is only defensible because the pass cannot damage a recording:
+`mic.wav` is never modified, a recording it cannot handle is declined with the
+reason recorded, and `Meta::preferred_mic_path()` refuses to pass on a result
+whose own measurements do not clear the bar. The cost of being wrong about any
+given recording is one unused file. With headphones there is no echo to remove
+and it costs a few seconds of processing that finds nothing.
 
 ### What it achieves
 
@@ -440,12 +447,15 @@ arguments — which of the two you get is decided by the arguments you pass to
 
 ## Known gaps
 
-- **Echo cancellation defaults to off**, and is opt-in per install for its first
-  release. See the section above for what it does when enabled.
-- The macOS idle-tap gap below is *guarded against* rather than fixed: the pass
+- The macOS idle-tap gap is *guarded against* rather than fixed: the pass
   declines when the tracks differ in length. The real fix is gap-filling at the
   writer, using the per-buffer callback timestamps `TrackSink::push` already
-  receives and currently discards after the first.
+  receives and currently discards after the first. Until then, a recording whose
+  output device sat idle partway through gets no echo removal at all — correctly,
+  but it is a silent loss of the feature rather than a failure.
+- **Echo cancellation has only been measured against a recorded session**, not a
+  live acoustic loop. `scripts/check_aec.sh --live` exists for that and has not
+  been run on either platform.
 - **Linux is compile-verified only** — no one has run it against a live
   PipeWire session. See the Linux section above.
 - **Windows is entirely unverified**, not even compile-checked. The loopback
