@@ -46,7 +46,14 @@ pub struct TrackInfo {
 ///
 /// Every field is either a number or a short fixed string, so the whole struct
 /// is safe to report as telemetry except for `path`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `#[serde(default)]` on the struct, the same discipline as
+/// [`crate::config::Settings`]: an `aec` block written by an older build must
+/// still load, or changing the canceller would make every previously processed
+/// recording unreadable. `version` is what distinguishes a stale block from a
+/// current one — absence of a field never should.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AecInfo {
     /// Relative path of the cancelled track. Absent when the pass declined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,8 +70,14 @@ pub struct AecInfo {
     pub delay_confidence: f32,
     pub delay_spread_ms: f32,
     pub drift_ppm: f32,
-    pub filter_ms: u32,
-    pub frame_ms: u32,
+    /// Whether AEC3's nonlinear residual suppressor was allowed to run.
+    pub residual_suppression: bool,
+    /// AEC3's own estimate of the echo delay, in milliseconds. Recorded
+    /// alongside our own measurement as an independent cross-check — they
+    /// should broadly agree, and a wide disagreement is the first thing to look
+    /// at when a recording cancels badly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_delay_ms: Option<u32>,
     /// Echo return loss enhancement over far-end-active frames. The headline
     /// number: how much echo actually came out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,8 +224,8 @@ mod tests {
             delay_confidence: 11.3,
             delay_spread_ms: 2.4,
             drift_ppm: 0.2,
-            filter_ms: 150,
-            frame_ms: 10,
+            residual_suppression: true,
+            reported_delay_ms: Some(31),
             erle_db,
             near_gain_db,
             silence_secs: 28.0,

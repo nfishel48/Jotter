@@ -44,6 +44,14 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # The `aec` feature builds WebRTC's AudioProcessing from source, which is
+      # an autotools/meson project. `bundled` is deliberate: linking a system
+      # libwebrtc-audio-processing would make the build depend on a package most
+      # distros ship at a different major version.
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install pkg-config meson ninja
+
       # Needed to *compile* on Linux, not to run: the pipewire/alsa -sys crates
       # need real headers, and eframe + tray-icon pull in gtk/x11/wayland.
       #
@@ -56,6 +64,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config clang libclang-dev cmake \
+            meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
             libasound2-dev \
             libgtk-3-dev libayatana-appindicator3-dev \
@@ -92,10 +101,9 @@ jobs:
           cargo check --locked --no-default-features --features cli,telemetry
           cargo check --locked --no-default-features --features gui,telemetry
           cargo check --locked --no-default-features --features gui,cli
-          # `aec` compiles vendored C. The leg that matters is the one *without*
-          # it: build.rs gates on CARGO_FEATURE_AEC rather than cfg(feature),
-          # because Cargo never passes features to a build script as cfg. Get
-          # that wrong and either the canceller silently never compiles, or a
-          # distro building without `aec` suddenly needs a C toolchain.
+          # `aec` builds WebRTC's AudioProcessing from source. The leg that
+          # matters most is the one *without* it: a distro or fork that turns
+          # `aec` off must not need meson, ninja or a C++ toolchain at all, and
+          # the only way that stays true is by checking it.
           cargo check --locked --no-default-features --features cli,aec
           cargo check --locked --no-default-features --features gui,aec

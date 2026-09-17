@@ -15,6 +15,7 @@ pub const APP_EXITED: &str = "app_exited";
 pub const RECORDING_STARTED: &str = "recording_started";
 pub const RECORDING_COMPLETED: &str = "recording_completed";
 pub const RECORDING_FAILED: &str = "recording_failed";
+pub const RECORDING_PROCESSED: &str = "recording_processed";
 
 pub const DEVICES_REFRESHED: &str = "devices_refreshed";
 pub const DEVICE_LIST_FAILED: &str = "device_list_failed";
@@ -116,6 +117,79 @@ pub fn recording_props(meta: &crate::audio::meta::Meta) -> Vec<Prop> {
     // fingerprint the way an exact duration would be.
     if let Some(offset) = meta.track_offset_secs() {
         props.push(("track_offset_ms", ((offset * 1000.0).round() as i64).into()));
+    }
+
+    props
+}
+
+/// Everything worth reporting about an echo-cancellation pass.
+///
+/// Same contract as [`recording_props`]: this function picks, call sites do not
+/// assemble. `AecReport` carries the output path, which must never be sent, so
+/// funnelling through here keeps that a single place to review.
+///
+/// The two numbers that matter are `erle_db` — how much echo came out — and
+/// `near_gain_db`, whether the filter ate the user's own voice. The second is
+/// the one an ERLE figure cannot show, and the reason a pass can look
+/// successful while having made the recording worse.
+#[cfg(feature = "aec")]
+pub fn aec_props(report: &crate::audio::process::AecReport, dry_run: bool) -> Vec<Prop> {
+    let census = &report.census;
+    let total = census.silence + census.near_only + census.far_only + census.double_talk;
+
+    let mut props = vec![
+        ("dry_run", dry_run.into()),
+        ("applied", (report.output.is_some()).into()),
+        ("delay_source", report.delay.source.as_str().into()),
+        (
+            "delay_ms",
+            ((report.delay.frames as f32 * 1_000.0 / report.config.sample_rate.max(1) as f32)
+                .round() as i64)
+                .into(),
+        ),
+        (
+            "residual_suppression",
+            report.config.residual_suppression.into(),
+        ),
+        ("delay_segments", (report.delay.segments_used as u32).into()),
+        ("drift_ppm", (report.delay.drift_ppm.round() as i64).into()),
+        ("far_gap_secs", (report.far_gap_secs.round() as i64).into()),
+        ("duration_bucket", duration_bucket(total as f64).into()),
+    ];
+
+    // Absent metrics are omitted rather than zeroed: a zero ERLE means "removed
+    // nothing", which is a completely different finding from "never measured".
+    if let Some(erle) = report.stats.erle_db {
+        props.push(("erle_db", (erle.round() as i64).into()));
+    }
+    if let Some(gain) = report.stats.near_gain_db {
+        props.push(("near_gain_db", (gain.round() as i64).into()));
+    }
+    if let Some(gain) = report.stats.double_talk_gain_db {
+        props.push(("double_talk_gain_db", (gain.round() as i64).into()));
+    }
+    // AEC3's own delay estimate, alongside ours. A wide disagreement in
+    // aggregate would mean one of the two estimators is wrong on real hardware.
+    if let Some(ms) = report.stats.reported_delay_ms {
+        props.push(("aec3_delay_ms", ms.into()));
+    }
+    if let Some(bypass) = report.bypass {
+        // From `kind()`, never `Display` — the human-facing message embeds
+        // durations and a device-shaped description.
+        props.push(("bypass_reason", bypass.kind().into()));
+    }
+
+    // Fractions rather than seconds: the shape of a meeting is the useful
+    // signal, and an exact duration is closer to a fingerprint.
+    if total > 0.0 {
+        props.push((
+            "double_talk_pct",
+            ((census.double_talk / total * 100.0).round() as i64).into(),
+        ));
+        props.push((
+            "far_only_pct",
+            ((census.far_only / total * 100.0).round() as i64).into(),
+        ));
     }
 
     props

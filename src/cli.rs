@@ -25,8 +25,42 @@ pub enum Command {
     /// List audio devices and show which ones can be tapped for system audio
     #[command(alias = "list")]
     Devices,
+    /// Remove speaker echo from the mic track of a finished recording
+    #[cfg(feature = "aec")]
+    Process(ProcessArgs),
     /// Show or change whether anonymous usage data is sent
     Telemetry(TelemetryArgs),
+}
+
+/// `jotter process <dir>`.
+///
+/// Touches no audio devices, so unlike `record` it needs no permissions and no
+/// macOS bundle. That is what makes it usable for iterating on the canceller —
+/// and it works on recordings made before echo cancellation existed.
+#[cfg(feature = "aec")]
+#[derive(Args)]
+pub struct ProcessArgs {
+    /// Recording directory, containing mic.wav, system.wav and meta.json
+    dir: PathBuf,
+
+    /// Measure and report, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Reprocess even if a current mic_aec.wav already exists
+    #[arg(long)]
+    force: bool,
+
+    /// Skip delay measurement and use this value. For debugging a recording
+    /// whose delay the estimator gets wrong.
+    #[arg(long, value_name = "MS")]
+    delay_ms: Option<f32>,
+
+    /// Leave only AEC3's linear filter, skipping its nonlinear residual
+    /// suppressor. Much weaker, but the suppressor is the part that could
+    /// damage speech, so this exists to measure without it.
+    #[arg(long)]
+    no_suppression: bool,
 }
 
 #[derive(Args)]
@@ -113,6 +147,8 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let result = match command {
         Command::Devices => list_devices(&telemetry),
         Command::Record(args) => record(args, &telemetry),
+        #[cfg(feature = "aec")]
+        Command::Process(args) => process(args, &telemetry),
         Command::Telemetry(_) => unreachable!("handled above"),
     };
 
@@ -251,6 +287,92 @@ fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture
     ];
     telemetry.track(events::RECORDING_FAILED, &props);
     telemetry.report_error(e.kind(), e.cpal_kind(), &props);
+}
+
+/// `jotter process <dir>` — offline echo cancellation.
+#[cfg(feature = "aec")]
+fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+    use audio::process::{ProcessOptions, run};
+
+    let options = ProcessOptions {
+        dry_run: args.dry_run,
+        force: args.force,
+        delay_ms: args.delay_ms,
+        no_suppression: args.no_suppression,
+    };
+
+    println!("processing {}", args.dir.display());
+    let report = run(&args.dir, options)?;
+    report_aec(&report);
+
+    telemetry.track(
+        events::RECORDING_PROCESSED,
+        &events::aec_props(&report, args.dry_run),
+    );
+    Ok(())
+}
+
+/// Prints what the pass decided, in the shape of [`report_track`].
+#[cfg(feature = "aec")]
+fn report_aec(report: &audio::process::AecReport) {
+    let census = &report.census;
+    let total = census.silence + census.near_only + census.far_only + census.double_talk;
+    if total > 0.0 {
+        println!(
+            "  activity   silence {:.0}s  you {:.0}s  them {:.0}s  both {:.0}s",
+            census.silence, census.near_only, census.far_only, census.double_talk
+        );
+    }
+
+    if let Some(bypass) = report.bypass {
+        println!("  SKIPPED    {bypass}");
+        return;
+    }
+
+    let delay_ms = report.delay.frames as f32 * 1_000.0 / report.config.sample_rate.max(1) as f32;
+    print!(
+        "  delay      {:.1}ms ({}",
+        delay_ms,
+        report.delay.source.as_str()
+    );
+    if report.delay.segments_used > 0 {
+        print!(
+            ", {} segments, spread {:.1}ms, confidence {:.1}",
+            report.delay.segments_used, report.delay.spread_ms, report.delay.confidence
+        );
+    }
+    println!(")");
+    if let Some(ms) = report.stats.reported_delay_ms {
+        println!("  AEC3 delay {ms}ms (its own estimate, as a cross-check)");
+    }
+    println!(
+        "  suppressor {}",
+        if report.config.residual_suppression {
+            "on"
+        } else {
+            "off (linear only)"
+        }
+    );
+
+    match report.stats.erle_db {
+        Some(erle) => println!("  echo       {erle:.1}dB removed where system audio was playing"),
+        None => println!("  echo       not measurable — system audio was never active"),
+    }
+    // The figure an ERLE number cannot show: whether the user's own voice
+    // survived. Printed even when it is fine, because "fine" is the result.
+    match report.stats.near_gain_db {
+        Some(gain) if gain < -1.0 => println!(
+            "  your voice {gain:.1}dB — the filter is cutting into it; \
+             mic.wav is unchanged and still the safe choice"
+        ),
+        Some(gain) => println!("  your voice {gain:+.1}dB (unchanged, as it should be)"),
+        None => {}
+    }
+
+    match &report.output {
+        Some(path) => println!("  wrote      {}", path.display()),
+        None => println!("  wrote      nothing (dry run)"),
+    }
 }
 
 fn report_track(label: &str, track: &audio::meta::TrackInfo) {
