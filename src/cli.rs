@@ -3,6 +3,7 @@
 //!   jotter devices
 //!   jotter record --duration 10
 //!   jotter record --system <id> --mic <id> --duration 600
+//!   jotter process recordings/<dir>
 //!
 //! This exists to exercise the capture path without the tray app in the way:
 //! the two macOS permissions are granted separately, and a terminal session
