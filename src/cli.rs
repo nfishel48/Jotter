@@ -298,7 +298,7 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         if both_have_audio {
             println!();
             let report = audio::process::run(&dir, audio::process::ProcessOptions::default())?;
-            report_aec(&report);
+            report_aec(&report, false);
             telemetry.track(
                 events::RECORDING_PROCESSED,
                 &events::aec_props(&report, false),
@@ -337,7 +337,7 @@ fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
 
     println!("processing {}", args.dir.display());
     let report = run(&args.dir, options)?;
-    report_aec(&report);
+    report_aec(&report, args.dry_run);
 
     telemetry.track(
         events::RECORDING_PROCESSED,
@@ -348,7 +348,7 @@ fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
 
 /// Prints what the pass decided, in the shape of [`report_track`].
 #[cfg(feature = "aec")]
-fn report_aec(report: &audio::process::AecReport) {
+fn report_aec(report: &audio::process::AecReport, dry_run: bool) {
     let census = &report.census;
     let total = census.silence + census.near_only + census.far_only + census.double_talk;
     if total > 0.0 {
@@ -380,19 +380,33 @@ fn report_aec(report: &audio::process::AecReport) {
         println!("  AEC3 delay {ms}ms (its own estimate, as a cross-check)");
     }
 
-    match report.stats.erle_db {
-        Some(erle) => println!("  echo       {erle:.1}dB removed where system audio was playing"),
-        None => println!("  echo       not measurable — system audio was never active"),
-    }
-    // The figure an ERLE number cannot show: whether the user's own voice
-    // survived. Printed even when it is fine, because "fine" is the result.
-    match report.stats.near_gain_db {
-        Some(gain) if gain < -1.0 => println!(
-            "  your voice {gain:.1}dB — the filter is cutting into it; \
-             mic.wav is unchanged and still the safe choice"
-        ),
-        Some(gain) => println!("  your voice {gain:+.1}dB (unchanged, as it should be)"),
-        None => {}
+    // A dry run stops before the canceller, so there are no figures yet — and
+    // saying "not measurable" there would blame the recording for something
+    // that simply did not run.
+    if dry_run {
+        println!("  echo       not measured (dry run)");
+    } else {
+        match report.stats.erle_db {
+            Some(erle) => {
+                println!("  echo       {erle:.1}dB removed where system audio was playing")
+            }
+            None => println!("  echo       not measurable — no echo-only passages to compare"),
+        }
+        // The figure an ERLE number cannot show: whether the user's own voice
+        // survived. Printed even when it is fine, because "fine" is the result.
+        match report.stats.near_gain_db {
+            Some(gain) if gain < -1.0 => println!(
+                "  your voice {gain:.1}dB — the filter is cutting into it; \
+                 mic.wav is unchanged and still the safe choice"
+            ),
+            Some(gain) => println!("  your voice {gain:+.1}dB (unchanged, as it should be)"),
+            // No stretch of the user talking alone, so nothing was verified.
+            // Say so: this is the check that matters, and its absence is why
+            // `Meta::preferred_mic_path` will not hand the cancelled track on.
+            None => println!(
+                "  your voice not verified — no passage of you talking alone to check against"
+            ),
+        }
     }
 
     match &report.output {
