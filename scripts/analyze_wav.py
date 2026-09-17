@@ -53,20 +53,46 @@ def tone_purity(samples, rate, freq=440.0):
     return min(1.0, 2.0 * power / (n * total))
 
 
+def frame_levels(path, frame_ms=100):
+    """Per-frame (peak, rms) for a whole file, read in chunks.
+
+    Streaming rather than one `readframes(getnframes())`: a nine-minute 48 kHz
+    recording is 25.7M samples, and unpacking that into a Python tuple costs
+    roughly 800 MB. The frame series is also what `check_aec.py` needs, so this
+    is the shared primitive rather than a second reader.
+    """
+    with wave.open(path) as w:
+        rate, width = w.getframerate(), w.getsampwidth()
+        frame = max(1, rate * frame_ms // 1000)
+        out = []
+        while True:
+            raw = w.readframes(frame * 64)
+            if not raw:
+                return rate, out
+            for i in range(0, len(raw) - frame * width + 1, frame * width):
+                chunk = raw[i : i + frame * width]
+                samples = struct.unpack("<%dh" % (len(chunk) // 2), chunk)
+                peak = max(abs(s) for s in samples)
+                rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+                out.append((peak, rms))
+
+
 def analyze(path):
     with wave.open(path) as w:
         frames, rate, channels = w.getnframes(), w.getframerate(), w.getnchannels()
-        if frames == 0:
-            return (
-                f"{os.path.basename(path):12} EMPTY — 0 frames captured.\n"
-                f"{'':12} No audio callbacks arrived at all. Either the device was "
-                f"idle (nothing was playing) or the wrong device was tapped."
-            )
-        raw = w.readframes(frames)
+    if frames == 0:
+        return (
+            f"{os.path.basename(path):12} EMPTY — 0 frames captured.\n"
+            f"{'':12} No audio callbacks arrived at all. Either the device was "
+            f"idle (nothing was playing) or the wrong device was tapped."
+        )
 
-    samples = struct.unpack("<%dh" % (len(raw) // 2), raw)
-    peak = max(abs(s) for s in samples)
-    rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+    _, levels = frame_levels(path)
+    peak = max((p for p, _ in levels), default=0)
+    # Energy-weighted, so the figure matches a whole-file RMS rather than an
+    # average of per-frame RMS values.
+    total = sum(r * r for _, r in levels)
+    rms = math.sqrt(total / len(levels)) if levels else 0.0
     dbfs = 20 * math.log10(rms / 32768) if rms > 0 else float("-inf")
 
     line = (
