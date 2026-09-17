@@ -107,3 +107,17 @@ jobs:
           # the only way that stays true is by checking it.
           cargo check --locked --no-default-features --features cli,aec
           cargo check --locked --no-default-features --features gui,aec
+
+      # release.yml builds both macOS arches and `lipo`s them into one binary,
+      # and `aec` puts a C++ autotools project in that path. This job otherwise
+      # only ever builds for the runner's own arch, so a cross-compilation break
+      # would first surface during a release — after merging, when the tag is
+      # already being cut.
+      #
+      # `check` rather than `build`: it still runs the build script, so the C++
+      # is genuinely compiled for the target, without paying for the link.
+      - name: Check the non-native macOS arch (guards the universal release)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo check --locked --target x86_64-apple-darwin
