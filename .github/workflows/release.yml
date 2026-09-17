@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 # Only one release at a time: two concurrent runs would race on the version
-# bump and could tag the same number twice. Not cancel-in-progress — a
+# number and could claim the same one twice. Not cancel-in-progress — a
 # half-finished release that has already pushed a tag must be allowed to
 # finish publishing.
 concurrency:
@@ -24,79 +24,193 @@ jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
+  # Works out the number only. Nothing is committed, tagged or pushed until
+  # every platform has produced a binary — see `publish`.
   version:
-    name: Bump patch version
+    name: Work out the next version
     needs: test
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.bump.outputs.version }}
-      sha: ${{ steps.bump.outputs.sha }}
+      version: ${{ steps.next.outputs.version }}
+      sha: ${{ steps.next.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-          # A shallow checkout cannot push.
+          # A shallow checkout cannot push, and `publish` builds the changelog
+          # from tag history.
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Bump patch version
-        id: bump
+      - name: Compute the next version
+        id: next
         run: |
           set -euo pipefail
+          # The bump is applied to the working tree and thrown away. Every
+          # other job re-applies it to the same commit, which is deterministic:
+          # the script derives the number from Cargo.toml alone.
           VERSION="$(./scripts/bump_version.sh patch)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-
-          # [skip ci] is belt-and-braces: pushes authenticated with
-          # GITHUB_TOKEN do not trigger workflow runs, so this cannot loop.
-          git commit -m "chore: release v$VERSION [skip ci]"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push origin main --follow-tags
-
+          # Pin the tip of main here and build, tag and release that exact
+          # commit everywhere below, so the binaries and the tag cannot end up
+          # describing different source.
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build ${{ matrix.label }}
+  # One runner per architecture, deliberately: `aec` builds WebRTC's
+  # AudioProcessing (and abseil) from C++ source with meson, and that build is
+  # not target-aware — on an Apple Silicon runner it compiles for the host
+  # whatever `--target` says. Cross-building x86_64 that way put arm64 objects
+  # inside the x86_64 rlib, the linker discarded every one of them, and the
+  # release failed on undefined `webrtc::` symbols after the tag was already
+  # pushed (v0.1.7). `lipo` in `package-macos` joins the two native builds.
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
     needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            label: macOS (universal)
-            artifact: Jotter-macos-universal
-          - os: ubuntu-latest
-            label: Linux (x86_64)
-            artifact: jotter-linux-x86_64
+          - os: macos-latest # Apple Silicon
+            arch: arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel # the Intel image; there is no macos-latest-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # Build the bumped commit, so binaries report the version we tagged.
           ref: ${{ needs.version.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.os }}
+          key: release-${{ matrix.target }}
 
       # Mirrors ci.yml: the `aec` feature builds WebRTC's AudioProcessing from
-      # source. Both macOS arches are cross-built below, and the bundled C++ has
-      # to cross-build with them.
+      # source, which is a meson project.
       - name: Install macOS build dependencies
-        if: runner.os == 'macOS'
         run: brew install pkg-config meson ninja
+
+      - name: Apply the version bump
+        env:
+          EXPECT: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Not committed here — this only bakes CARGO_PKG_VERSION into the
+          # binary. `publish` makes the one commit, once the builds are in.
+          VERSION="$(./scripts/bump_version.sh patch)"
+          [ "$VERSION" = "$EXPECT" ] || {
+            echo "::error::bumped to $VERSION, expected $EXPECT"
+            exit 1
+          }
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          # A repo *variable*, not a secret. PostHog project tokens are
+          # write-only and public by design — every site running PostHog serves
+          # one in its page source — so there is nothing to protect, and a
+          # secret would additionally be unavailable to fork PRs. Unset simply
+          # builds a binary that sends nothing, which is what a fork should get.
+          JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin jotter --target "$TARGET"
+
+          # Assert the architecture rather than trust the runner label: if an
+          # image were relabelled, two arm64 halves would otherwise reach
+          # `lipo` and only the missing x86_64 slice would give it away.
+          BIN="target/$TARGET/release/jotter"
+          lipo -info "$BIN"
+          lipo -info "$BIN" | grep -q "$ARCH" || {
+            echo "::error::$BIN is not $ARCH"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jotter-macos-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/jotter
+          if-no-files-found: error
+          # An input to package-macos, not something anyone downloads.
+          retention-days: 1
+
+  # One download that runs on both Apple Silicon and Intel, rather than making
+  # users work out which they have.
+  package-macos:
+    name: Package macOS universal .app
+    needs: [version, build-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jotter-macos-*
+          path: arch-bins
+
+      - name: Assemble the universal .app
+        env:
+          # bundle.sh reads this rather than Cargo.toml, so this job needs no
+          # Rust toolchain and no bump of its own.
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release
+          lipo -create \
+            "arch-bins/jotter-macos-arm64/jotter" \
+            "arch-bins/jotter-macos-x86_64/jotter" \
+            -output "target/release/jotter"
+          # Artifacts do not preserve the executable bit.
+          chmod +x target/release/jotter
+
+          lipo -info target/release/jotter
+          for arch in arm64 x86_64; do
+            lipo -info target/release/jotter | grep -q "$arch" || {
+              echo "::error::universal binary is missing $arch"
+              exit 1
+            }
+          done
+
+          # The .app is the shippable unit, not the bare binary: macOS will not
+          # grant system-audio access to an executable with no bundle identity.
+          SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh
+
+          ditto -c -k --keepParent build/Jotter.app "Jotter-macos-universal.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jotter-macos-universal
+          path: Jotter-macos-universal.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build Linux (x86_64)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-ubuntu-latest
 
       # Mirrors ci.yml. cmake is for aws-lc-sys, which builds a C crypto library
       # and arrives via posthog-rs -> reqwest -> rustls.
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -108,43 +222,21 @@ jobs:
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 
-      # One download that runs on both Apple Silicon and Intel, rather than
-      # making users work out which they have.
-      - name: Build macOS universal .app
-        if: runner.os == 'macOS'
+      - name: Apply the version bump
         env:
-          VERSION: ${{ needs.version.outputs.version }}
-          # A repo *variable*, not a secret. PostHog project tokens are
-          # write-only and public by design — every site running PostHog serves
-          # one in its page source — so there is nothing to protect, and a
-          # secret would additionally be unavailable to fork PRs. Unset simply
-          # builds a binary that sends nothing, which is what a fork should get.
-          JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
+          EXPECT: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-          cargo build --release --locked --bin jotter --target aarch64-apple-darwin
-          cargo build --release --locked --bin jotter --target x86_64-apple-darwin
-
-          mkdir -p target/release
-          lipo -create \
-            "target/aarch64-apple-darwin/release/jotter" \
-            "target/x86_64-apple-darwin/release/jotter" \
-            -output "target/release/jotter"
-          lipo -info "target/release/jotter"
-
-          # The .app is the shippable unit, not the bare binary: macOS will not
-          # grant system-audio access to an executable with no bundle identity.
-          SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh
-
-          ditto -c -k --keepParent build/Jotter.app "Jotter-macos-universal.zip"
+          VERSION="$(./scripts/bump_version.sh patch)"
+          [ "$VERSION" = "$EXPECT" ] || {
+            echo "::error::bumped to $VERSION, expected $EXPECT"
+            exit 1
+          }
 
       - name: Build Linux binary
-        if: runner.os == 'Linux'
         env:
           VERSION: ${{ needs.version.outputs.version }}
-          # See the macOS step for why this is a variable rather than a secret.
+          # See the macOS build for why this is a variable rather than a secret.
           JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
@@ -158,16 +250,18 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            Jotter-macos-universal.zip
-            jotter-linux-x86_64.tar.gz
+          name: jotter-linux-x86_64
+          path: jotter-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    name: Publish release
-    needs: [version, build]
+  # The tag is cut here and nowhere else. Everything above builds from an
+  # untagged tree, so a build that fails costs a re-run rather than a version
+  # number: v0.1.7 was tagged before the macOS build ran, and when that build
+  # failed the number was spent on a release that does not exist.
+  publish:
+    name: Tag and publish
+    needs: [version, package-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,10 +270,47 @@ jobs:
           # Need tag history to build the changelog range.
           fetch-depth: 0
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Named explicitly: the per-architecture binaries are also artifacts of
+      # this run and both are called `jotter`, so a merged download would
+      # collide.
       - uses: actions/download-artifact@v4
         with:
+          name: Jotter-macos-universal
           path: dist
-          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jotter-linux-x86_64
+          path: dist
+
+      - name: Commit the bump and tag
+        env:
+          EXPECT: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$(./scripts/bump_version.sh patch)"
+          [ "$VERSION" = "$EXPECT" ] || {
+            echo "::error::bumped to $VERSION, expected $EXPECT"
+            exit 1
+          }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+
+          # [skip ci] is belt-and-braces: pushes authenticated with
+          # GITHUB_TOKEN do not trigger workflow runs, so this cannot loop.
+          git commit -m "chore: release v$VERSION [skip ci]"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+
+          # Fast-forward only (the default for a plain push), and main must
+          # still be the commit these binaries were built from. If anything
+          # else landed while the builds ran, this is rejected and the release
+          # fails *before* tagging — rather than publishing binaries whose
+          # source is not what the tag points at.
+          git push origin HEAD:main --follow-tags
 
       - name: Publish
         env:

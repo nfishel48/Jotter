@@ -31,7 +31,13 @@ jobs:
     strategy:
       fail-fast: false # a Linux-only break should not hide a macOS-only one
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Both macOS architectures, because release.yml ships a universal
+        # binary built from a native build of each. macos-latest is Apple
+        # Silicon; macos-15-intel is the Intel image (there is no
+        # macos-latest-intel). Without the Intel leg an x86_64-only break —
+        # the `aec` link failure that sank v0.1.7 was one — reaches main and
+        # surfaces during a release instead of on the pull request.
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
 
     steps:
       - uses: actions/checkout@v4
@@ -107,17 +113,3 @@ jobs:
           # the only way that stays true is by checking it.
           cargo check --locked --no-default-features --features cli,aec
           cargo check --locked --no-default-features --features gui,aec
-
-      # release.yml builds both macOS arches and `lipo`s them into one binary,
-      # and `aec` puts a C++ autotools project in that path. This job otherwise
-      # only ever builds for the runner's own arch, so a cross-compilation break
-      # would first surface during a release — after merging, when the tag is
-      # already being cut.
-      #
-      # `check` rather than `build`: it still runs the build script, so the C++
-      # is genuinely compiled for the target, without paying for the link.
-      - name: Check the non-native macOS arch (guards the universal release)
-        if: runner.os == 'macOS'
-        run: |
-          rustup target add x86_64-apple-darwin
-          cargo check --locked --target x86_64-apple-darwin
