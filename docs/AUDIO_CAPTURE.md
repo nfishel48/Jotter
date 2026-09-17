@@ -263,6 +263,101 @@ With output muted there is no acoustic path, so any pure tone appearing in
 `mic.wav` would prove the streams are crossed. It doesn't. Measured track offset
 is +0.007s.
 
+## Echo cancellation
+
+On speakers, the microphone re-captures the remote participants. Every remote
+voice then lands in *both* tracks, which defeats the point of recording two of
+them and hands transcription a doubled copy of the remote side. Headphones make
+the problem vanish; laptop speakers make it the dominant content of `mic.wav`.
+
+```
+jotter process recordings/<dir>   # clean an existing recording
+jotter process --dry-run <dir>    # measure and report, write nothing
+jotter record --duration 600      # on by default; cleans it when recording stops
+```
+
+Both `process` and `record` print what the pass achieved, and the same figures
+land in `meta.json` under `aec` — so judging a recording needs nothing beyond
+the binary.
+
+**On by default.** Turn it off in the settings pane, with `--no-aec`, or by
+setting `aec_enabled` to `false` in the config file.
+
+Defaulting on is only defensible because the pass cannot damage a recording:
+`mic.wav` is never modified, a recording it cannot handle is declined with the
+reason recorded, and `Meta::preferred_mic_path()` refuses to pass on a result
+whose own measurements do not clear the bar. The cost of being wrong about any
+given recording is one unused file. With headphones there is no echo to remove
+and it costs a few seconds of processing that finds nothing.
+
+### What it achieves
+
+Measured on a 8m56s Linux/PipeWire meeting recorded on laptop speakers, by
+activity class:
+
+| what was happening | secs | level change |
+| --- | --- | --- |
+| remote side only | 122 | **-21.1 dB** |
+| both at once | 233 | **-18.0 dB** |
+| you only | 40 | -0.4 dB |
+| neither | 141 | -0.8 dB |
+
+Echo goes from roughly 1000 rms to 19 while the user's own voice is left alone.
+Per band the removal is even at 17-21 dB from 150 Hz to 8 kHz.
+
+The two numbers are not interchangeable and the second is the one that matters.
+An echo canceller that quietly eats the near end scores beautifully on echo
+removal alone, which is why both are reported and why `preferred_mic_path`
+requires both to clear a bar.
+
+These figures were cross-checked against an independent reimplementation of the
+same measurements, which agreed to within 0.3 dB (21.1 vs 20.8). That script is
+not kept in the repo — the point of it was to catch a mistake in the Rust
+measurement, and it did, once.
+
+### Design notes
+
+- **WebRTC AEC3, not a hand-rolled filter.** One was built first, over vendored
+  Speex MDF, and reached 1.2 dB where AEC3 reaches 21. The gap is not tuning:
+  AEC3 models the *nonlinear* part of the echo path, which is most of it when the
+  source is a small speaker driven loud, and no linear adaptive filter reaches
+  that however long its tail. Two independent linear-only measurements of this
+  recording predicted a ceiling in the low single digits; AEC3 cleared it by
+  30 dB, so the premise those measurements rested on was simply wrong.
+- **The tracks are fed unaligned.** AEC3 estimates the echo delay itself. An
+  earlier version pre-shifted the mic track by our own measurement, which is
+  actively dangerous: an alignment slightly *too large* asks the filter to model
+  an echo arriving before its cause, and nothing can express that. We still
+  measure the delay — `meta.json` records both estimates so they can be compared
+  — but only to report it and to run the drift and swapped-track guards.
+- **Two passes.** The first converges the filter and its output is discarded; the
+  second re-runs from the start with it already trained, so the opening of the
+  recording is cancelled as well as the rest. Worth 5 dB on echo-only passages.
+- **Costs meson and ninja at build time.** The `bundled` feature compiles
+  WebRTC's C++ from source rather than linking a system
+  `libwebrtc-audio-processing`, so no user is missing a package. All of it sits
+  behind the `aec` cargo feature, and CI checks the leg without it so turning it
+  off keeps needing no C++ toolchain.
+
+### When it declines
+
+Subtracting a misaligned reference *adds* uncorrelated energy, which is worse
+than doing nothing, so the pass would rather stop than guess. Every refusal is
+recorded in `meta.json` as `aec.bypassed` — a pass can always say what it
+decided and why, because silence is indistinguishable from a crash.
+
+The sharpest case is macOS-specific. An idle output device yields no frames at
+all, so silence is compressed *out* of `system.wav` rather than recorded, and the
+two tracks end up different lengths with no single delay able to align them.
+`recordings/1789486023/meta.json` has 10.0s of mic against 4.6s of system from
+the same recording. The pass bypasses above 250 ms of difference; the reference
+Linux pair differs by 21 ms, which is two callback buffers and must not trip it.
+
+Clock drift is the other one. Two devices on one clock — the normal case — drift
+at essentially zero, but a USB mic against built-in speakers is two clock domains
+and can reach 100 ppm, or 0.36 s per hour. No single delay describes a recording
+like that, including AEC3's own, so above 20 ppm the pass declines.
+
 ## Code layout
 
 ```
@@ -275,6 +370,9 @@ src/audio/devices.rs    enumeration, direction classification, default selection
 src/audio/capture.rs    open_mic / open_loopback, duplex guard, error mapping
 src/audio/writer.rs     mpsc -> hound writer thread, f32->i16, mono downmix
 src/audio/meta.rs       meta.json sidecar, timestamp_dir_name()
+src/audio/aec/mod.rs    WebRTC AEC3 wrapper, activity thresholds  (feature "aec")
+src/audio/aec/delay.rs  echo-delay measurement, drift and swap guards
+src/audio/process.rs    the offline pass: WAV I/O, two passes, meta rewrite
 ```
 
 Output per recording:
@@ -282,6 +380,7 @@ Output per recording:
 ```
 recordings/<timestamp>/
 ├── mic.wav      (you)
+├── mic_aec.wav  (you, with speaker echo removed — only if the pass ran)
 ├── system.wav   (everyone else)
 └── meta.json
 ```
@@ -298,6 +397,22 @@ recordings/<timestamp>/
 - **The callback never touches the filesystem.** It downmixes, converts to i16,
   and hands an owned buffer to a writer thread over an mpsc channel. Blocking a
   realtime audio thread on I/O causes dropouts.
+- **Echo cancellation is offline, and additive.** It runs after the recording
+  ends, not in the callback, and writes a second file rather than modifying
+  `mic.wav`. The raw mic track is the one artifact that cannot be recreated.
+- **A pure tone is a useless reference for testing echo cancellation.** It
+  excites one frequency, so the echo path is unidentifiable everywhere else and
+  the resulting figure looks spectacular while meaning nothing. `check_audio.sh`
+  has a 440 Hz tone right there and it is the wrong tool for this — use speech,
+  or speech-shaped noise. Related: `check_audio.sh` *mutes* output deliberately,
+  to remove the very speaker-to-mic path echo cancellation exists to address, so
+  it cannot be used to test this either.
+- **Judging it needs a passage of you talking alone.** Echo removal alone is not
+  evidence of success: a canceller that eats the near end scores beautifully on
+  it. `near_gain_db` in `meta.json` is the check that matters, and it is only
+  computed when the recording contains a stretch of near-end speech with the far
+  end quiet. Without one, the reports say so rather than claiming success, and
+  `preferred_mic_path` declines to pass the cancelled track on.
 - **`f32 → i16` clamps before scaling.** Loopback audio can exceed ±1.0 when an
   app applies its own gain, and wrapping would turn a loud passage into harsh
   noise.
@@ -340,11 +455,25 @@ arguments — which of the two you get is decided by the arguments you pass to
 3. Hand the WAVs to whisper → `action_items.sh`, and confirm two-track input
    actually improves speaker attribution over a mixed file.
 4. Consider a self-signed certificate so TCC grants survive rebuilds.
+5. Gap-fill `system.wav` at the writer, so an idle output device produces silence
+   rather than a shorter file. Fixes alignment for every consumer, not just echo
+   cancellation, and would let the pass stop declining on such recordings.
+6. Record a real meeting on speakers with echo cancellation enabled, on both
+   macOS and Linux, and confirm the reported figures hold up. Everything
+   measured so far comes from one recorded Linux session.
 
 ## Known gaps
 
-- No acoustic echo cancellation. Irrelevant on AirPods; on speakers the mic
-  re-captures remote audio, so each remote speaker lands in both tracks.
+- The macOS idle-tap gap is *guarded against* rather than fixed: the pass
+  declines when the tracks differ in length. The real fix is gap-filling at the
+  writer, using the per-buffer callback timestamps `TrackSink::push` already
+  receives and currently discards after the first. Until then, a recording whose
+  output device sat idle partway through gets no echo removal at all — correctly,
+  but it is a silent loss of the feature rather than a failure.
+- **Echo cancellation has only been measured against a recorded session**, not a
+  live acoustic loop. Verifying that means recording a real meeting on speakers
+  with `aec_enabled` on and reading the reported figures — there is no automated
+  harness for it, because it needs someone to actually talk.
 - **Linux is compile-verified only** — no one has run it against a live
   PipeWire session. See the Linux section above.
 - **Windows is entirely unverified**, not even compile-checked. The loopback

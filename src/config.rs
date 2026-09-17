@@ -32,6 +32,13 @@ pub struct Settings {
     /// `Option` rather than generated here because `uuid` is a `telemetry`-only
     /// dependency, and a build without that feature must never create one.
     pub install_id: Option<String>,
+    /// Whether to remove speaker echo from the mic track after each recording.
+    ///
+    /// A `bool` rather than any tuning knob: `Settings` derives `Eq`, so it
+    /// cannot hold an `f32`, and there is nothing here worth tuning per-user
+    /// anyway. The raw `mic.wav` is never modified either way, so the worst case
+    /// is a wasted second file.
+    pub aec_enabled: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +49,15 @@ impl Default for Settings {
             telemetry_enabled: true,
             telemetry_notice_seen: false,
             install_id: None,
+            // On by default: on speakers, echo makes the mic track's remote
+            // speech a duplicate of `system.wav`, which is the problem two
+            // tracks exist to avoid — so the default should be the one that
+            // fixes it. Safe to default on because the pass is additive:
+            // `mic.wav` is never modified, a recording it cannot handle is
+            // declined with the reason recorded, and `preferred_mic_path`
+            // refuses to pass on a result whose own numbers do not clear the
+            // bar. The cost of being wrong is one unused file.
+            aec_enabled: true,
         }
     }
 }
@@ -183,6 +199,10 @@ mod tests {
             telemetry_enabled: false,
             telemetry_notice_seen: true,
             install_id: Some("abc".into()),
+            // Deliberately the opposite of the default: a round-trip test that
+            // stores default values cannot tell a persisted field from a
+            // defaulted one.
+            aec_enabled: false,
         };
 
         settings.save_to(&path).unwrap();
@@ -197,6 +217,19 @@ mod tests {
         assert!(settings.telemetry_enabled);
         assert!(!settings.telemetry_notice_seen);
         assert_eq!(settings.install_id, None);
+    }
+
+    /// A named assertion rather than a bare default, so changing whether every
+    /// recording gets a second pass over it is a deliberate edit with a test to
+    /// update — in either direction.
+    ///
+    /// Defaulting *on* is only defensible because the pass cannot damage the
+    /// recording: it writes a new file rather than modifying `mic.wav`,
+    /// declines when it cannot align the tracks, and records why. If any of
+    /// that stops being true, this default is the first thing to revisit.
+    #[test]
+    fn aec_defaults_to_on_because_the_pass_is_additive() {
+        assert!(Settings::default().aec_enabled);
     }
 
     #[test]
@@ -229,6 +262,10 @@ mod tests {
         // Absent keys must not become `false`/`None` by accident.
         assert!(!loaded.telemetry_notice_seen);
         assert_eq!(loaded.install_id, None);
+        // A settings file written before this key existed — every install that
+        // predates the feature — must pick up the new default rather than
+        // silently reading as `false`.
+        assert!(loaded.aec_enabled);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

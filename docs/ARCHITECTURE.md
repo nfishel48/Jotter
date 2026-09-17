@@ -288,6 +288,49 @@ time.
 
 ---
 
+## Workflow 6 — Removing the echo
+
+Runs after the recording is already saved, so nothing here can lose audio. The
+mic track is never modified; the result is a second file beside it.
+
+```mermaid
+flowchart TB
+    S[stop returns Meta] --> G{aec_enabled<br/>and both tracks<br/>have audio?}
+    G -- no --> F[Status::Finished]
+    G -- yes --> T[spawn worker thread<br/>Status::Processing]
+    T --> A{check_alignable<br/>from meta.json alone}
+    A -- "lengths differ > 250ms<br/>rates differ / empty track" --> B[record aec.bypassed<br/>write no audio]
+    A -- ok --> C[classify activity<br/>100ms RMS frames]
+    C --> D[measure delay<br/>for the record]
+    D -- "drift > 20ppm<br/>or echo precedes cause" --> B
+    D --> P1[pass 1: converge<br/>output discarded]
+    P1 --> P2[pass 2: from t=0<br/>filter already trained]
+    P2 --> W[mic_aec.wav.tmp<br/>then rename]
+    W --> M[rewrite meta.json<br/>with erle and near_gain]
+    B --> M
+    M --> R[send to egui thread]
+    R --> F
+
+    style T fill:#e8f4ff
+    style B fill:#ffe8e8
+    style W fill:#e8ffe8
+```
+
+### Why each step is the way it is
+
+| Step | Reason |
+| --- | --- |
+| Offline, not in the callback | The two cpal streams never see each other, and the realtime callback must not allocate. Offline also means recordings made before this existed can be cleaned. |
+| On a worker thread | `stop()` is called from the egui thread. A pass takes tens of seconds on a long meeting, and blocking there freezes the window *and* the tray. |
+| Drained in `logic`, not `ui` | A tray app spends most of its life with the window hidden. A result that only landed when someone opened the window would leave the pane stale. |
+| `check_alignable` first | Every check in it is answerable from `meta.json`, so a hopeless recording costs no I/O at all. |
+| Tracks fed unaligned | AEC3 estimates the delay itself. Pre-shifting by our own measurement risks an alignment slightly *too large*, which asks the filter to model an echo arriving before its cause — inexpressible, and unrecoverable. |
+| Two passes | The first second or two of a cold filter is uncancelled, and in a meeting that is the greeting. Worth 5 dB on echo-only passages. |
+| tmp + rename | The tray's Quit calls `process::exit(0)`. A pass killed mid-write would otherwise leave a truncated file whose RIFF header claims it is complete. |
+| Bypass reasons in `meta.json` | A pass must be able to say "I decided not to, and here is why". No file and no explanation is indistinguishable from a crash. |
+
+---
+
 ## Recording state machine
 
 ```mermaid
@@ -295,8 +338,11 @@ stateDiagram-v2
     [*] --> Idle
     Idle --> Recording: toggle_recording()<br/>audio::start ok
     Idle --> Error: start failed<br/>(duplex / permission / io)
+    Recording --> Processing: stop() ok<br/>and aec_enabled
     Recording --> Finished: stop() ok
     Recording --> Error: stop() failed
+    Processing --> Finished: pass done<br/>(applied or declined)
+    Processing --> Error: pass failed
     Error --> Recording: retry
     Finished --> Recording: start again
 
@@ -304,6 +350,12 @@ stateDiagram-v2
         Device pickers are locked.
         A device cannot change
         underneath a live stream.
+    end note
+
+    note right of Processing
+        The audio is already on disk.
+        Nothing is at risk if the app
+        is quit here.
     end note
 
     note right of Finished
@@ -319,9 +371,11 @@ stateDiagram-v2
 
 ```
 ~/Documents/Jotter/2026-09-15_14-32-08/
-├── mic.wav      you          48 kHz mono i16
-├── system.wav   everyone else 48 kHz mono i16
-└── meta.json    devices, rates, frames, stream_errors, first-callback instants
+├── mic.wav      you           48 kHz mono i16
+├── mic_aec.wav  you, echo removed — only when the pass ran and did not decline
+├── system.wav   everyone else  48 kHz mono i16
+└── meta.json    devices, rates, frames, stream_errors, first-callback instants,
+                 and what echo cancellation did or why it declined
 ```
 
 Two tracks rather than one mixed file, because merging is lossy in ways you
@@ -329,6 +383,13 @@ cannot undo: overlapping speech collapses (Whisper drops or garbles a speaker),
 diarization has to recover "me" from scratch instead of knowing it for free, and
 per-track gain normalization becomes impossible. You can always mix down later;
 you can never un-mix.
+
+`mic_aec.wav` is additive, never a replacement: `mic.wav` is the one artifact
+that cannot be recreated. Downstream consumers should call
+`Meta::preferred_mic_path()` rather than picking a file themselves — it returns
+the cancelled track only when the pass's own recorded numbers clear the bar, so
+a pass that ran and achieved nothing does not get fed to transcription just
+because it produced a file.
 
 Downstream this feeds `whisper → action_items.sh`, which is not wired up yet.
 
@@ -347,6 +408,9 @@ explicitly rather than trusting the happy path.
 | Truncated / unopenable WAV | Process exited without `finalize()` | `on_exit` + tray Quit both stop first |
 | Tray menu unresponsive | Polling put in `ui` instead of `logic` | `logic` polls and re-arms its own repaint |
 | Writes to `/recordings` | Relative path from a bundle, whose cwd is `/` | `recordings_root()` is absolute |
+| `mic_aec.wav` sounds *worse* than `mic.wav` | A misaligned far-end reference adds uncorrelated energy instead of removing echo. Happens when the two tracks cannot be aligned at all — an idle macOS tap, or drifting clocks | `process::check_alignable` and the drift guard bypass rather than guess; the reason lands in `meta.json` as `aec.bypassed` |
+| Echo removal looks like it ate the speaker's voice | Frames were classified near-only while the echo tail was still decaying, so correctly removing it counted as damage | 200 ms far-end hangover in `process::classify` |
+| The window freezes for seconds after Stop | The pass ran on the egui thread | `App::start_processing` spawns it; `poll_processing` drains in `logic` |
 
 ---
 
@@ -358,7 +422,10 @@ explicitly rather than trusting the happy path.
 | `audio/devices.rs` | Enumeration, direction classification, `can_loopback()`, default selection |
 | `audio/capture.rs` | `open_mic` / `open_loopback`, the duplex guard, `CaptureError` and its per-platform access hints |
 | `audio/writer.rs` | `TrackWriter` / `TrackSink`, the realtime→writer boundary, format conversion |
-| `audio/meta.rs` | `Meta`, `TrackInfo`, `track_offset_secs()`, `timestamp_dir_name()` |
+| `audio/meta.rs` | `Meta`, `TrackInfo`, `AecInfo`, `track_offset_secs()`, `preferred_mic_path()`, `timestamp_dir_name()` |
+| `audio/aec/mod.rs` | The AEC3 wrapper, `AecStats`, the frame-activity threshold (feature `aec`) |
+| `audio/aec/delay.rs` | Echo-delay measurement, the drift and swapped-track guards |
+| `audio/process.rs` | The offline pass: activity classification, bypass decisions, WAV I/O, `meta.json` rewrite |
 | `main.rs` | clap parsing and the GUI/CLI dispatch |
 | `cli.rs` | `record` / `devices` / `telemetry` subcommands and their console output |
 | `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |

@@ -3,6 +3,7 @@
 //!   jotter devices
 //!   jotter record --duration 10
 //!   jotter record --system <id> --mic <id> --duration 600
+//!   jotter process recordings/<dir>
 //!
 //! This exists to exercise the capture path without the tray app in the way:
 //! the two macOS permissions are granted separately, and a terminal session
@@ -25,8 +26,36 @@ pub enum Command {
     /// List audio devices and show which ones can be tapped for system audio
     #[command(alias = "list")]
     Devices,
+    /// Remove speaker echo from the mic track of a finished recording
+    #[cfg(feature = "aec")]
+    Process(ProcessArgs),
     /// Show or change whether anonymous usage data is sent
     Telemetry(TelemetryArgs),
+}
+
+/// `jotter process <dir>`.
+///
+/// Touches no audio devices, so unlike `record` it needs no permissions and no
+/// macOS bundle. That is what makes it usable for iterating on the canceller —
+/// and it works on recordings made before echo cancellation existed.
+#[cfg(feature = "aec")]
+#[derive(Args)]
+pub struct ProcessArgs {
+    /// Recording directory, containing mic.wav, system.wav and meta.json
+    dir: PathBuf,
+
+    /// Measure and report, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Reprocess even if a current mic_aec.wav already exists
+    #[arg(long)]
+    force: bool,
+
+    /// Skip delay measurement and use this value. For debugging a recording
+    /// whose delay the estimator gets wrong.
+    #[arg(long, value_name = "MS")]
+    delay_ms: Option<f32>,
 }
 
 #[derive(Args)]
@@ -67,6 +96,16 @@ pub struct RecordArgs {
     /// microphone, not system audio.
     #[arg(long)]
     force_system_on_duplex: bool,
+
+    /// Remove speaker echo from the mic track when the recording ends.
+    /// Defaults to the stored setting; `--no-aec` forces it off.
+    #[cfg(feature = "aec")]
+    #[arg(long, overrides_with = "no_aec")]
+    aec: bool,
+
+    #[cfg(feature = "aec")]
+    #[arg(long, overrides_with = "aec")]
+    no_aec: bool,
 }
 
 /// Mirrors `audio::Sources` rather than deriving `ValueEnum` on it directly:
@@ -113,6 +152,8 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let result = match command {
         Command::Devices => list_devices(&telemetry),
         Command::Record(args) => record(args, &telemetry),
+        #[cfg(feature = "aec")]
+        Command::Process(args) => process(args, &telemetry),
         Command::Telemetry(_) => unreachable!("handled above"),
     };
 
@@ -175,6 +216,17 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
     let sources = args.only.telemetry_name();
     let mic_is_default = args.mic.is_none();
     let system_is_default = args.system.is_none();
+    // Read before `args` is consumed. `--aec`/`--no-aec` override the stored
+    // setting, so a one-off run can opt in or out without editing the config
+    // file — which is the only way to test both paths from a single build.
+    #[cfg(feature = "aec")]
+    let run_aec = if args.aec {
+        true
+    } else if args.no_aec {
+        false
+    } else {
+        Settings::load().aec_enabled
+    };
 
     let config = RecordConfig {
         sources: args.only.into(),
@@ -201,7 +253,8 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
             ("fixed_duration", args.duration.is_some().into()),
         ],
     );
-    println!("recording to {}", handle.out_dir().display());
+    let dir = handle.out_dir().to_path_buf();
+    println!("recording to {}", dir.display());
 
     match args.duration {
         Some(secs) => {
@@ -235,6 +288,24 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         println!("track offset: {:+.3}s (system relative to mic)", offset);
     }
 
+    // After the track report, not instead of it: the recording is the result,
+    // and echo removal is something that then happened to it.
+    #[cfg(feature = "aec")]
+    if run_aec {
+        let both_have_audio = [meta.mic.as_ref(), meta.system.as_ref()]
+            .iter()
+            .all(|t| t.is_some_and(|t| t.frames > 0));
+        if both_have_audio {
+            println!();
+            let report = audio::process::run(&dir, audio::process::ProcessOptions::default())?;
+            report_aec(&report, false);
+            telemetry.track(
+                events::RECORDING_PROCESSED,
+                &events::aec_props(&report, false),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -251,6 +322,97 @@ fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture
     ];
     telemetry.track(events::RECORDING_FAILED, &props);
     telemetry.report_error(e.kind(), e.cpal_kind(), &props);
+}
+
+/// `jotter process <dir>` — offline echo cancellation.
+#[cfg(feature = "aec")]
+fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+    use audio::process::{ProcessOptions, run};
+
+    let options = ProcessOptions {
+        dry_run: args.dry_run,
+        force: args.force,
+        delay_ms: args.delay_ms,
+    };
+
+    println!("processing {}", args.dir.display());
+    let report = run(&args.dir, options)?;
+    report_aec(&report, args.dry_run);
+
+    telemetry.track(
+        events::RECORDING_PROCESSED,
+        &events::aec_props(&report, args.dry_run),
+    );
+    Ok(())
+}
+
+/// Prints what the pass decided, in the shape of [`report_track`].
+#[cfg(feature = "aec")]
+fn report_aec(report: &audio::process::AecReport, dry_run: bool) {
+    let census = &report.census;
+    let total = census.silence + census.near_only + census.far_only + census.double_talk;
+    if total > 0.0 {
+        println!(
+            "  activity   silence {:.0}s  you {:.0}s  them {:.0}s  both {:.0}s",
+            census.silence, census.near_only, census.far_only, census.double_talk
+        );
+    }
+
+    if let Some(bypass) = report.bypass {
+        println!("  SKIPPED    {bypass}");
+        return;
+    }
+
+    let delay_ms = report.delay.frames as f32 * 1_000.0 / report.config.sample_rate.max(1) as f32;
+    print!(
+        "  delay      {:.1}ms ({}",
+        delay_ms,
+        report.delay.source.as_str()
+    );
+    if report.delay.segments_used > 0 {
+        print!(
+            ", {} segments, spread {:.1}ms, confidence {:.1}",
+            report.delay.segments_used, report.delay.spread_ms, report.delay.confidence
+        );
+    }
+    println!(")");
+    if let Some(ms) = report.stats.reported_delay_ms {
+        println!("  AEC3 delay {ms}ms (its own estimate, as a cross-check)");
+    }
+
+    // A dry run stops before the canceller, so there are no figures yet — and
+    // saying "not measurable" there would blame the recording for something
+    // that simply did not run.
+    if dry_run {
+        println!("  echo       not measured (dry run)");
+    } else {
+        match report.stats.erle_db {
+            Some(erle) => {
+                println!("  echo       {erle:.1}dB removed where system audio was playing")
+            }
+            None => println!("  echo       not measurable — no echo-only passages to compare"),
+        }
+        // The figure an ERLE number cannot show: whether the user's own voice
+        // survived. Printed even when it is fine, because "fine" is the result.
+        match report.stats.near_gain_db {
+            Some(gain) if gain < -1.0 => println!(
+                "  your voice {gain:.1}dB — the filter is cutting into it; \
+                 mic.wav is unchanged and still the safe choice"
+            ),
+            Some(gain) => println!("  your voice {gain:+.1}dB (unchanged, as it should be)"),
+            // No stretch of the user talking alone, so nothing was verified.
+            // Say so: this is the check that matters, and its absence is why
+            // `Meta::preferred_mic_path` will not hand the cancelled track on.
+            None => println!(
+                "  your voice not verified — no passage of you talking alone to check against"
+            ),
+        }
+    }
+
+    match &report.output {
+        Some(path) => println!("  wrote      {}", path.display()),
+        None => println!("  wrote      nothing (dry run)"),
+    }
 }
 
 fn report_track(label: &str, track: &audio::meta::TrackInfo) {

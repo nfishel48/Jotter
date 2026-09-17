@@ -12,7 +12,7 @@ name = "jotter"
 path = "src/main.rs"
 
 [features]
-default = ["gui", "cli", "telemetry"]
+default = ["gui", "cli", "telemetry", "aec"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
 # gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
 gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
@@ -23,6 +23,11 @@ cli = ["dep:clap"]
 # a distro or fork rebuild can produce a provably offline binary. Everything in
 # `src/telemetry` has a no-op shim, so no call site is `cfg`-gated.
 telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
+# Offline echo cancellation: removing speaker bleed from the mic track after a
+# recording ends. Off means the C++ audio-processing stack is not built at all,
+# and the build needs no `meson`/`ninja` — the same kind of guarantee
+# `telemetry` gives for the network stack.
+aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
@@ -57,6 +62,27 @@ tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 # The install id. v4 only: it must be random, not derived from anything about
 # the machine.
 uuid = { version = "1", features = ["v4"], optional = true }
+
+# WebRTC's AudioProcessing module, via PulseAudio's repackaging of it — the AEC3
+# echo canceller that browsers and every serious conferencing app use.
+#
+# `bundled` builds the C++ from source rather than linking a system library, so
+# there is no `libwebrtc-audio-processing-dev` for a user to be missing. It does
+# mean the build needs `clang`, `pkg-config`, `meson` and `ninja`; that cost is
+# confined to the `aec` feature.
+#
+# Writing the canceller by hand was tried first, over vendored Speex MDF, and the
+# measurements are why this is here instead: on the reference recording Speex
+# reached 1.8 dB where AEC3 reaches 20 dB on echo-only passages and 17.6 dB
+# through double-talk, while costing 0.29 dB on the user's own voice. AEC3
+# additionally estimates the echo delay itself, which removes a whole stage —
+# and a whole class of bug — from our side.
+webrtc-audio-processing = { version = "2.1", features = [
+  "bundled",
+], optional = true }
+# The config types live in their own crate and are only partly re-exported by the
+# parent, so `EchoCanceller` has to be named here.
+webrtc-audio-processing-config = { version = "2.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds

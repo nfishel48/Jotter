@@ -18,7 +18,16 @@ pub struct DeviceRow {
 pub enum Status {
     Idle,
     Recording,
-    Finished { dir: PathBuf, meta: Box<Meta> },
+    /// Echo cancellation is running over a recording that has already been
+    /// saved. A separate state from `Recording` because the audio is safe on
+    /// disk by this point — nothing is at risk if the app is quit.
+    Processing {
+        dir: PathBuf,
+    },
+    Finished {
+        dir: PathBuf,
+        meta: Box<Meta>,
+    },
     Error(String),
 }
 
@@ -33,6 +42,13 @@ pub enum Action {
     /// worker, and those belong to `App`, not to a widget.
     SetTelemetry(bool),
     DismissTelemetryNotice,
+    /// The user ticked or unticked the echo-cancellation checkbox.
+    ///
+    /// An `Action` for the same reason as [`Action::SetTelemetry`]: it is
+    /// written to disk, and the settings file belongs to `App`, not to a widget.
+    /// That is what distinguishes both from the device pickers, which are
+    /// `&mut` on `View` because they are not persisted at all.
+    SetAec(bool),
 }
 
 pub struct View<'a> {
@@ -46,6 +62,18 @@ pub struct View<'a> {
     /// hunting — the reason they moved out of Application Support.
     pub root: &'a Path,
     pub telemetry: TelemetryView,
+    pub aec: AecView,
+}
+
+/// Everything the processing section needs to render.
+#[derive(Clone, Copy)]
+pub struct AecView {
+    /// The stored preference — what the checkbox shows.
+    pub enabled: bool,
+    /// Whether this build can cancel echo at all. False without the `aec`
+    /// feature, in which case the checkbox is shown disabled rather than
+    /// hidden — the same reasoning as [`TelemetryView::available`].
+    pub available: bool,
 }
 
 /// Everything the privacy section needs to render.
@@ -121,6 +149,11 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                 }
             });
 
+            ui.add_space(8.0);
+            if let Some(chosen) = processing(ui, view.aec) {
+                action = Some(chosen);
+            }
+
             if !view.devices.iter().any(|d| d.can_loopback) {
                 ui.add_space(4.0);
                 ui.colored_label(
@@ -159,6 +192,36 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                 action = Some(privacy);
             }
         });
+    });
+
+    action
+}
+
+/// The echo-cancellation toggle.
+///
+/// Worth spelling out in the UI that the original is untouched: "remove" sounds
+/// destructive, and someone recording a meeting they cannot re-record wants to
+/// know that before they find out.
+fn processing(ui: &mut egui::Ui, view: AecView) -> Option<Action> {
+    let mut action = None;
+
+    ui.add_enabled_ui(view.available, |ui| {
+        let mut enabled = view.enabled;
+        if ui
+            .checkbox(&mut enabled, "Remove speaker echo from my microphone track")
+            .changed()
+        {
+            action = Some(Action::SetAec(enabled));
+        }
+
+        let detail = if view.available {
+            "On by default. Only matters on speakers — with headphones there is \
+             no echo to remove. Writes a second file; your original recording is \
+             never modified."
+        } else {
+            "This build was compiled without echo cancellation."
+        };
+        ui.label(egui::RichText::new(detail).small().weak());
     });
 
     action
@@ -259,6 +322,20 @@ fn status(ui: &mut egui::Ui, status: &Status) -> Option<PathBuf> {
         Status::Recording => {
             ui.label("Recording…");
         }
+        Status::Processing { dir } => {
+            ui.horizontal(|ui| {
+                ui.label("Saved:");
+                if ui.link(dir.display().to_string()).clicked() {
+                    reveal = Some(dir.clone());
+                }
+            });
+            ui.label("Removing speaker echo…");
+            ui.label(
+                egui::RichText::new("The recording is already safe on disk.")
+                    .small()
+                    .weak(),
+            );
+        }
         Status::Error(message) => {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
         }
@@ -293,6 +370,47 @@ fn status(ui: &mut egui::Ui, status: &Status) -> Option<PathBuf> {
                         egui::Color32::from_rgb(200, 120, 0),
                         format!("  {label}: {} stream error(s)", track.stream_errors),
                     );
+                }
+            }
+
+            // The same "say what went wrong rather than looking successful"
+            // reasoning as the zero-frames warning above: a pass that declined,
+            // or one that ran and achieved nothing, must not be silent about it.
+            if let Some(aec) = meta.aec.as_ref() {
+                ui.add_space(4.0);
+                match (&aec.bypassed, aec.erle_db) {
+                    (Some(_), _) => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Echo removal skipped — the microphone track is unchanged.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    (None, Some(erle)) => {
+                        ui.label(format!("Echo removed: {erle:.0} dB"));
+                        // Negative means the canceller cut into the user's own
+                        // voice, which is the one outcome worth a warning: the
+                        // cancelled track is then worse than the original.
+                        if aec.near_gain_db.is_some_and(|g| g < -1.0) {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 120, 0),
+                                "  Your voice was affected too — the original mic.wav \
+                                 is still the safe choice.",
+                            );
+                        }
+                    }
+                    (None, None) => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Echo removal ran, but there was no system audio to \
+                                 measure against.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
                 }
             }
         }

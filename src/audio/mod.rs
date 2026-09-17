@@ -6,9 +6,13 @@
 //! on an *output* device — cpal turns that into a loopback capture. See
 //! [`capture::open_loopback`] for why the choice of output device matters.
 
+#[cfg(feature = "aec")]
+pub mod aec;
 pub mod capture;
 pub mod devices;
 pub mod meta;
+#[cfg(feature = "aec")]
+pub mod process;
 pub mod writer;
 
 use std::path::{Path, PathBuf};
@@ -131,6 +135,10 @@ impl RecordingHandle {
             ended_at: meta::to_unix_secs(SystemTime::now()),
             mic,
             system,
+            // Filled in later by the offline echo-cancellation pass, which runs
+            // off this thread. `stop()` stays as fast as it is today because the
+            // GUI calls it from the egui thread.
+            aec: None,
         };
         meta.write(&out_dir.join("meta.json"))?;
         Ok(meta)

@@ -77,6 +77,7 @@ takes the other option.
 | `recording_started` | Recording begins | `mic_is_default`, `system_is_default`, `has_loopback_device`, `sources`, `fixed_duration`, `force_system_on_duplex` |
 | `recording_completed` | Recording saved | `duration_bucket`, `track_count`, `stream_errors`, `{mic,system}_present`, `{mic,system}_captured_audio`, `{mic,system}_sample_rate`, `{mic,system}_source_channels`, `track_offset_ms` |
 | `recording_failed` | Recording could not start or finish | `phase`, `error_kind`, `cpal_kind`, `permission_shaped` |
+| `recording_processed` | Echo cancellation ran, or declined to | `dry_run`, `applied`, `delay_source`, `delay_ms`, `delay_segments`, `drift_ppm`, `aec3_delay_ms`, `far_gap_secs`, `duration_bucket`, `erle_db`, `near_gain_db`, `double_talk_gain_db`, `bypass_reason`, `double_talk_pct`, `far_only_pct` |
 | `devices_refreshed` | Device list read | `total`, `input_capable`, `loopback_capable`, `has_default_output` |
 | `device_list_failed` | Device list could not be read | `error_kind` |
 | `settings_opened` | Settings window shown | `trigger` |
@@ -91,7 +92,19 @@ question actually being asked.
 
 `error_kind` is a fixed identifier such as `no_input_device` or
 `duplex_system_device` — never the error message, which names the device
-involved.
+involved. `bypass_reason` works the same way: a fixed identifier like
+`track_length_mismatch`, never the human-readable explanation, which embeds
+durations and a device-shaped description.
+
+The echo-cancellation properties are all integers or fixed identifiers. The two
+worth explaining: `erle_db` is how much echo was removed, and `near_gain_db` is
+how much of *your* voice was lost doing it — the second is what says whether the
+feature is working or quietly making recordings worse, and it is the reason the
+first is not reported alone. Both are omitted entirely when they could not be
+measured, because a zero would be indistinguishable from "removed nothing".
+`double_talk_pct` and `far_only_pct` are percentages rather than seconds: the
+shape of a meeting is the useful signal, an exact duration is closer to a
+fingerprint. The path of the file written is never sent.
 
 ### Crash reports
 
