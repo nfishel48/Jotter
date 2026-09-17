@@ -58,8 +58,7 @@ def frame_levels(path, frame_ms=100):
 
     Streaming rather than one `readframes(getnframes())`: a nine-minute 48 kHz
     recording is 25.7M samples, and unpacking that into a Python tuple costs
-    roughly 800 MB. The frame series is also what `check_aec.py` needs, so this
-    is the shared primitive rather than a second reader.
+    roughly 800 MB.
     """
     with wave.open(path) as w:
         rate, width = w.getframerate(), w.getsampwidth()

@@ -217,8 +217,8 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
     let mic_is_default = args.mic.is_none();
     let system_is_default = args.system.is_none();
     // Read before `args` is consumed. `--aec`/`--no-aec` override the stored
-    // setting so a check script can drive the whole loop without editing
-    // config, which is what `scripts/check_aec.sh` relies on.
+    // setting, so a one-off run can opt in or out without editing the config
+    // file — which is the only way to test both paths from a single build.
     #[cfg(feature = "aec")]
     let run_aec = if args.aec {
         true
