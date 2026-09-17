@@ -32,6 +32,13 @@ pub struct Settings {
     /// `Option` rather than generated here because `uuid` is a `telemetry`-only
     /// dependency, and a build without that feature must never create one.
     pub install_id: Option<String>,
+    /// Whether to remove speaker echo from the mic track after each recording.
+    ///
+    /// A `bool` rather than any tuning knob: `Settings` derives `Eq`, so it
+    /// cannot hold an `f32`, and there is nothing here worth tuning per-user
+    /// anyway. The raw `mic.wav` is never modified either way, so the worst case
+    /// is a wasted second file.
+    pub aec_enabled: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +49,13 @@ impl Default for Settings {
             telemetry_enabled: true,
             telemetry_notice_seen: false,
             install_id: None,
+            // Off for the first release that carries it. New code with a native
+            // dependency, running over every recording, deserves one release of
+            // people opting in before it becomes the default — and the macOS
+            // idle-tap gap (see `audio::process`) is only guarded against, not
+            // yet fixed. `aec_defaults_to_off_until_it_has_shipped_once` is the
+            // reminder to revisit that.
+            aec_enabled: false,
         }
     }
 }
@@ -183,6 +197,7 @@ mod tests {
             telemetry_enabled: false,
             telemetry_notice_seen: true,
             install_id: Some("abc".into()),
+            aec_enabled: true,
         };
 
         settings.save_to(&path).unwrap();
@@ -197,6 +212,17 @@ mod tests {
         assert!(settings.telemetry_enabled);
         assert!(!settings.telemetry_notice_seen);
         assert_eq!(settings.install_id, None);
+    }
+
+    /// A named assertion rather than a bare default, so flipping echo
+    /// cancellation on by default is a deliberate edit with a test to update —
+    /// not something that drifts in unnoticed. Flip it once
+    /// `scripts/check_aec.sh --live` has passed on both macOS and Linux, and
+    /// once the macOS idle-tap gap is fixed at the writer rather than merely
+    /// guarded against.
+    #[test]
+    fn aec_defaults_to_off_until_it_has_shipped_once() {
+        assert!(!Settings::default().aec_enabled);
     }
 
     #[test]
@@ -229,6 +255,7 @@ mod tests {
         // Absent keys must not become `false`/`None` by accident.
         assert!(!loaded.telemetry_notice_seen);
         assert_eq!(loaded.install_id, None);
+        assert!(!loaded.aec_enabled);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

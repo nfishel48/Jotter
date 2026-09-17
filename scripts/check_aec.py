@@ -213,8 +213,7 @@ def main():
             print(
                 f"  pass says: {info.get('delay_frames', 0) * 1000 / rate:.1f}ms delay"
                 f" ({info.get('delay_source', '?')}),"
-                f" AEC3 said {info.get('reported_delay_ms', '?')}ms,"
-                f" suppressor {'on' if info.get('residual_suppression') else 'off'}"
+                f" AEC3 said {info.get('reported_delay_ms', '?')}ms"
             )
             if info.get("bypassed"):
                 print(f"  pass declined: {info['bypassed']}")

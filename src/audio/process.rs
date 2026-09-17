@@ -281,10 +281,6 @@ pub struct ProcessOptions {
     pub force: bool,
     /// Skip measurement and use this delay. For debugging; `None` measures.
     pub delay_ms: Option<f32>,
-    /// Turn off AEC3's nonlinear residual suppressor, leaving only the linear
-    /// filter. For comparing the two — suppression is the part that could
-    /// damage speech, so there has to be a way to measure without it.
-    pub no_suppression: bool,
 }
 
 /// What the pass did. `bypass` set means nothing was written.
@@ -455,10 +451,7 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
         }
     };
 
-    report.config = aec::AecConfig {
-        sample_rate,
-        residual_suppression: !options.no_suppression,
-    };
+    report.config = aec::AecConfig { sample_rate };
 
     if options.dry_run {
         return finish(dir, &meta_path, meta, report, None, options);
@@ -720,7 +713,6 @@ fn finish(
         delay_confidence: report.delay.confidence,
         delay_spread_ms: report.delay.spread_ms,
         drift_ppm: report.delay.drift_ppm,
-        residual_suppression: report.config.residual_suppression,
         reported_delay_ms: report.stats.reported_delay_ms,
         erle_db: report.stats.erle_db,
         near_gain_db: report.stats.near_gain_db,

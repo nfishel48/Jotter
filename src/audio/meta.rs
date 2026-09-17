@@ -70,8 +70,6 @@ pub struct AecInfo {
     pub delay_confidence: f32,
     pub delay_spread_ms: f32,
     pub drift_ppm: f32,
-    /// Whether AEC3's nonlinear residual suppressor was allowed to run.
-    pub residual_suppression: bool,
     /// AEC3's own estimate of the echo delay, in milliseconds. Recorded
     /// alongside our own measurement as an independent cross-check — they
     /// should broadly agree, and a wide disagreement is the first thing to look
@@ -224,7 +222,6 @@ mod tests {
             delay_confidence: 11.3,
             delay_spread_ms: 2.4,
             drift_ppm: 0.2,
-            residual_suppression: true,
             reported_delay_ms: Some(31),
             erle_db,
             near_gain_db,

@@ -55,12 +55,6 @@ pub struct ProcessArgs {
     /// whose delay the estimator gets wrong.
     #[arg(long, value_name = "MS")]
     delay_ms: Option<f32>,
-
-    /// Leave only AEC3's linear filter, skipping its nonlinear residual
-    /// suppressor. Much weaker, but the suppressor is the part that could
-    /// damage speech, so this exists to measure without it.
-    #[arg(long)]
-    no_suppression: bool,
 }
 
 #[derive(Args)]
@@ -101,6 +95,16 @@ pub struct RecordArgs {
     /// microphone, not system audio.
     #[arg(long)]
     force_system_on_duplex: bool,
+
+    /// Remove speaker echo from the mic track when the recording ends.
+    /// Defaults to the stored setting; `--no-aec` forces it off.
+    #[cfg(feature = "aec")]
+    #[arg(long, overrides_with = "no_aec")]
+    aec: bool,
+
+    #[cfg(feature = "aec")]
+    #[arg(long, overrides_with = "aec")]
+    no_aec: bool,
 }
 
 /// Mirrors `audio::Sources` rather than deriving `ValueEnum` on it directly:
@@ -211,6 +215,17 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
     let sources = args.only.telemetry_name();
     let mic_is_default = args.mic.is_none();
     let system_is_default = args.system.is_none();
+    // Read before `args` is consumed. `--aec`/`--no-aec` override the stored
+    // setting so a check script can drive the whole loop without editing
+    // config, which is what `scripts/check_aec.sh` relies on.
+    #[cfg(feature = "aec")]
+    let run_aec = if args.aec {
+        true
+    } else if args.no_aec {
+        false
+    } else {
+        Settings::load().aec_enabled
+    };
 
     let config = RecordConfig {
         sources: args.only.into(),
@@ -237,7 +252,8 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
             ("fixed_duration", args.duration.is_some().into()),
         ],
     );
-    println!("recording to {}", handle.out_dir().display());
+    let dir = handle.out_dir().to_path_buf();
+    println!("recording to {}", dir.display());
 
     match args.duration {
         Some(secs) => {
@@ -271,6 +287,24 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         println!("track offset: {:+.3}s (system relative to mic)", offset);
     }
 
+    // After the track report, not instead of it: the recording is the result,
+    // and echo removal is something that then happened to it.
+    #[cfg(feature = "aec")]
+    if run_aec {
+        let both_have_audio = [meta.mic.as_ref(), meta.system.as_ref()]
+            .iter()
+            .all(|t| t.is_some_and(|t| t.frames > 0));
+        if both_have_audio {
+            println!();
+            let report = audio::process::run(&dir, audio::process::ProcessOptions::default())?;
+            report_aec(&report);
+            telemetry.track(
+                events::RECORDING_PROCESSED,
+                &events::aec_props(&report, false),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -298,7 +332,6 @@ fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
         dry_run: args.dry_run,
         force: args.force,
         delay_ms: args.delay_ms,
-        no_suppression: args.no_suppression,
     };
 
     println!("processing {}", args.dir.display());
@@ -345,14 +378,6 @@ fn report_aec(report: &audio::process::AecReport) {
     if let Some(ms) = report.stats.reported_delay_ms {
         println!("  AEC3 delay {ms}ms (its own estimate, as a cross-check)");
     }
-    println!(
-        "  suppressor {}",
-        if report.config.residual_suppression {
-            "on"
-        } else {
-            "off (linear only)"
-        }
-    );
 
     match report.stats.erle_db {
         Some(erle) => println!("  echo       {erle:.1}dB removed where system audio was playing"),

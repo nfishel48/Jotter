@@ -147,10 +147,6 @@ pub fn aec_props(report: &crate::audio::process::AecReport, dry_run: bool) -> Ve
                 .round() as i64)
                 .into(),
         ),
-        (
-            "residual_suppression",
-            report.config.residual_suppression.into(),
-        ),
         ("delay_segments", (report.delay.segments_used as u32).into()),
         ("drift_ppm", (report.delay.drift_ppm.round() as i64).into()),
         ("far_gap_secs", (report.far_gap_secs.round() as i64).into()),
@@ -324,6 +320,71 @@ mod tests {
                 "{leaked:?} leaked into recording props: {rendered}"
             );
         }
+    }
+
+    /// The same PII contract for the processing pass. `AecReport` carries the
+    /// output path, so this is the test that keeps it out.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_props_omit_the_output_path() {
+        use crate::audio::process::{AecReport, Census};
+
+        let report = AecReport {
+            delay: crate::audio::aec::delay::DelayEstimate::unaligned(Some(256)),
+            census: Census {
+                silence: 28.0,
+                near_only: 91.0,
+                far_only: 22.0,
+                double_talk: 394.0,
+            },
+            stats: crate::audio::aec::AecStats {
+                frames: 53_580,
+                erle_db: Some(20.8),
+                near_gain_db: Some(-0.4),
+                double_talk_gain_db: Some(-17.6),
+                reported_delay_ms: Some(16),
+            },
+            config: crate::audio::aec::AecConfig::default(),
+            far_gap_secs: 0.021,
+            bypass: None,
+            output: Some("/Users/nfishel/Documents/Jotter/2026-09-16/mic_aec.wav".into()),
+        };
+
+        let rendered = format!("{:?}", aec_props(&report, false));
+        for leaked in ["nfishel", "Documents", "Jotter", ".wav", "mic_aec"] {
+            assert!(
+                !rendered.contains(leaked),
+                "{leaked:?} leaked into aec props: {rendered}"
+            );
+        }
+    }
+
+    /// Absent metrics are omitted rather than zeroed: a 0 dB ERLE means
+    /// "removed nothing", which is a completely different finding from "never
+    /// measured", and averaging the two together would hide both.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_props_omit_unmeasured_figures_rather_than_zeroing_them() {
+        use crate::audio::process::{AecBypass, AecReport, Census};
+
+        let report = AecReport {
+            delay: crate::audio::aec::delay::DelayEstimate::unaligned(None),
+            census: Census::default(),
+            stats: crate::audio::aec::AecStats::default(),
+            config: crate::audio::aec::AecConfig::default(),
+            far_gap_secs: 5.4,
+            bypass: Some(AecBypass::TrackLengthMismatch { delta_secs: 5.4 }),
+            output: None,
+        };
+
+        let props = aec_props(&report, false);
+        let keys: Vec<&str> = props.iter().map(|(k, _)| *k).collect();
+        assert!(!keys.contains(&"erle_db"), "unmeasured ERLE must be absent");
+        assert!(!keys.contains(&"near_gain_db"));
+        // The reason a pass declined is the most useful thing it can report.
+        let rendered = format!("{props:?}");
+        assert!(rendered.contains("track_length_mismatch"));
+        assert!(rendered.contains("bypass_reason"));
     }
 
     #[test]

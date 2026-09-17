@@ -1,6 +1,9 @@
 pub mod settings;
 pub mod tray;
 
+// `Path` is only referenced by the echo-cancellation hook.
+#[cfg(feature = "aec")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -36,6 +39,24 @@ pub struct App {
     /// because it is a duration, and the clock can jump.
     started: Instant,
     recordings_this_session: u32,
+    /// Result of the echo-cancellation pass, which runs on its own thread.
+    ///
+    /// Off the egui thread because `RecordingHandle::stop` is called from it and
+    /// the pass takes seconds on a long meeting — blocking here would freeze the
+    /// window *and* the tray. Drained in `logic`, not `ui`: `logic` runs while
+    /// the window is hidden, which is the normal case for a tray app, and it
+    /// already re-arms its own repaint.
+    #[cfg(feature = "aec")]
+    processing: Option<std::sync::mpsc::Receiver<ProcessOutcome>>,
+}
+
+/// What the processing thread sends back. The `Meta` is re-read from disk by the
+/// pass, so it carries the `aec` block the status pane wants to show.
+#[cfg(feature = "aec")]
+struct ProcessOutcome {
+    dir: PathBuf,
+    result: Result<Box<audio::meta::Meta>, String>,
+    props: Vec<crate::telemetry::Prop>,
 }
 
 impl App {
@@ -57,6 +78,8 @@ impl App {
             telemetry,
             started: Instant::now(),
             recordings_this_session: 0,
+            #[cfg(feature = "aec")]
+            processing: None,
         };
         app.refresh_devices();
 
@@ -192,6 +215,10 @@ impl App {
                 self.recordings_this_session += 1;
                 self.telemetry
                     .track(events::RECORDING_COMPLETED, &events::recording_props(&meta));
+                #[cfg(feature = "aec")]
+                if self.start_processing(&active.dir, &meta) {
+                    return;
+                }
                 settings::Status::Finished {
                     dir: active.dir,
                     meta: Box::new(meta),
@@ -202,6 +229,118 @@ impl App {
                 settings::Status::Error(e.to_string())
             }
         };
+    }
+
+    /// Spawns the echo-cancellation pass, returning whether it started.
+    ///
+    /// Declines cheaply and silently when there is nothing to do — no point
+    /// spinning up a thread to read two files and conclude that one of them is
+    /// empty. `audio::process` re-checks all of this properly.
+    #[cfg(feature = "aec")]
+    fn start_processing(&mut self, dir: &Path, meta: &audio::meta::Meta) -> bool {
+        if !self.settings.aec_enabled {
+            return false;
+        }
+        let both_have_audio = [meta.mic.as_ref(), meta.system.as_ref()]
+            .iter()
+            .all(|t| t.is_some_and(|t| t.frames > 0));
+        if !both_have_audio {
+            return false;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        let thread_dir = dir.clone();
+        std::thread::spawn(move || {
+            let options = audio::process::ProcessOptions::default();
+            let outcome = match audio::process::run(&thread_dir, options) {
+                Ok(report) => {
+                    let props = events::aec_props(&report, false);
+                    let meta = audio::meta::Meta::read(&thread_dir.join("meta.json"))
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    ProcessOutcome {
+                        dir: thread_dir,
+                        result: meta,
+                        props,
+                    }
+                }
+                Err(e) => ProcessOutcome {
+                    dir: thread_dir,
+                    result: Err(e.to_string()),
+                    props: vec![("failed", true.into())],
+                },
+            };
+            // A closed receiver means the app is shutting down, which is not an
+            // error: the audio is already on disk and `jotter process` can redo
+            // the pass.
+            let _ = tx.send(outcome);
+        });
+
+        self.processing = Some(rx);
+        self.status = settings::Status::Processing { dir };
+        true
+    }
+
+    /// Picks up the processing thread's result, if it has one yet.
+    #[cfg(feature = "aec")]
+    fn poll_processing(&mut self) {
+        let Some(rx) = self.processing.as_ref() else {
+            return;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            // Disconnected without a message means the thread panicked. Report
+            // it rather than leaving the pane saying "Removing speaker echo…"
+            // for the rest of the session.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.processing = None;
+                self.status = settings::Status::Error("echo removal stopped unexpectedly".into());
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        };
+
+        self.processing = None;
+        self.telemetry
+            .track(events::RECORDING_PROCESSED, &outcome.props);
+        self.status = match outcome.result {
+            Ok(meta) => settings::Status::Finished {
+                dir: outcome.dir,
+                meta,
+            },
+            // The recording itself is fine — only the extra pass failed — so the
+            // message says so rather than implying the audio is lost.
+            Err(e) => {
+                settings::Status::Error(format!("recording saved, but echo removal failed: {e}"))
+            }
+        };
+    }
+
+    /// Persist a change to the echo-cancellation preference.
+    ///
+    /// Simpler than [`Self::set_telemetry`]: there is no worker to notify, so no
+    /// ordering subtlety. Read at *stop* time rather than start, which is why no
+    /// `Settings` plumbing into `RecordConfig` is needed.
+    fn set_aec(&mut self, on: bool) {
+        self.settings.aec_enabled = on;
+        self.persist_settings();
+    }
+
+    #[cfg(feature = "aec")]
+    fn aec_view(&self) -> settings::AecView {
+        settings::AecView {
+            enabled: self.settings.aec_enabled,
+            available: true,
+        }
+    }
+
+    #[cfg(not(feature = "aec"))]
+    fn aec_view(&self) -> settings::AecView {
+        settings::AecView {
+            enabled: false,
+            available: false,
+        }
     }
 
     /// Report a capture failure as both an event and an exception.
@@ -385,15 +524,30 @@ impl eframe::App for App {
     /// it is the only interface the user has.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump_tray(ctx);
+        // Here rather than in `ui` because a tray app spends most of its life
+        // with the window hidden, and a pass whose result only lands when
+        // someone opens the window would leave the status pane stale.
+        #[cfg(feature = "aec")]
+        self.poll_processing();
 
         // eframe only calls `logic` when a repaint is pending, so the polling
         // loop has to keep itself alive. Without this the tray stops
         // responding as soon as the window is hidden.
-        ctx.request_repaint_after(Duration::from_millis(if self.recording.is_some() {
+        let interval = if self.recording.is_some() {
             200
         } else {
+            #[cfg(feature = "aec")]
+            if self.processing.is_some() {
+                // Poll faster while a pass is running so the pane updates
+                // promptly when it finishes.
+                200
+            } else {
+                500
+            }
+            #[cfg(not(feature = "aec"))]
             500
-        }));
+        };
+        ctx.request_repaint_after(Duration::from_millis(interval));
     }
 
     /// Finalize any in-progress recording before the process goes away.
@@ -413,6 +567,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         let telemetry_view = self.telemetry_view();
+        let aec_view = self.aec_view();
         let action = settings::draw(
             ui,
             settings::View {
@@ -424,6 +579,7 @@ impl eframe::App for App {
                 status: &self.status,
                 root: &recordings_root(),
                 telemetry: telemetry_view,
+                aec: aec_view,
             },
         );
 
@@ -446,6 +602,7 @@ impl eframe::App for App {
                 reveal_in_file_manager(&path);
             }
             Some(settings::Action::SetTelemetry(on)) => self.set_telemetry(on),
+            Some(settings::Action::SetAec(on)) => self.set_aec(on),
             Some(settings::Action::DismissTelemetryNotice) => {
                 self.settings.telemetry_notice_seen = true;
                 self.persist_settings();

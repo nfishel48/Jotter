@@ -28,8 +28,9 @@
 //! The gap is not a detail of tuning. AEC3 models the *nonlinear* part of the
 //! echo path, which is most of it when the source is a laptop speaker driven
 //! loud, and no linear adaptive filter can touch that however long its tail.
-//! A linear-only measurement of the same recording predicted a ceiling in the
-//! low single digits, and AEC3 cleared it by 30 dB.
+//! Two independent linear-only measurements of the same recording predicted a
+//! ceiling in the low single digits; AEC3 cleared it by 30 dB, so the premise
+//! those measurements rested on was simply wrong.
 
 pub mod delay;
 
@@ -47,35 +48,29 @@ use webrtc_audio_processing_config::EchoCanceller as Aec3Mode;
 pub const FLOOR_RMS: f32 = 300.0;
 
 /// How the canceller is configured.
+///
+/// Just the sample rate, and deliberately so. AEC3's internals — filter length,
+/// the nonlinear residual suppressor, the delay estimator — are not exposed by
+/// the stable API, and that is the right trade: there is nothing here to get
+/// wrong. A `--no-suppression` flag was written and then removed, because the
+/// suppressor cannot be turned off through this API and a flag that silently
+/// does nothing is worse than no flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AecConfig {
     pub sample_rate: u32,
-    /// Whether AEC3 may apply its nonlinear residual suppressor.
-    ///
-    /// On by default, and it is a large part of why this works: the measured
-    /// 20 dB on echo-only passages is well past what the linear filter alone can
-    /// reach. It is exposed because suppression is the one part that can damage
-    /// speech, so there has to be a way to turn it off and compare — but on the
-    /// reference recording it cost 0.29 dB of near-end level, which is far below
-    /// where transcription accuracy moves.
-    pub residual_suppression: bool,
 }
 
 impl Default for AecConfig {
     fn default() -> Self {
         Self {
             sample_rate: 48_000,
-            residual_suppression: true,
         }
     }
 }
 
 impl AecConfig {
     pub fn for_rate(sample_rate: u32) -> Self {
-        Self {
-            sample_rate,
-            ..Self::default()
-        }
+        Self { sample_rate }
     }
 }
 
