@@ -27,8 +27,10 @@ EXEC="jotter"
 PROFILE="${PROFILE:-debug}"
 BUNDLE_ID="com.nfishel.jotter"
 # Read from Cargo.toml rather than hardcoded, so released bundles report the
-# version CI actually tagged.
-VERSION="$("$(dirname "${BASH_SOURCE[0]}")/bump_version.sh" --current)"
+# version CI actually tagged. CI overrides it: the packaging job assembles the
+# .app from binaries built elsewhere and never applies the version bump to its
+# own checkout, so its Cargo.toml still reads the previous version.
+VERSION="${VERSION:-$("$(dirname "${BASH_SOURCE[0]}")/bump_version.sh" --current)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Deliberately not under target/: `cargo clean` would wipe the bundle, and TCC
 # keys partly on path — losing it means re-granting permissions.
