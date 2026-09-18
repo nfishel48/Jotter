@@ -13,6 +13,9 @@ pub mod devices;
 pub mod meta;
 #[cfg(feature = "aec")]
 pub mod process;
+// Ungated on purpose, unlike the passes built on it: the shared stage
+// mechanics must not sit behind any one stage's feature.
+pub mod stage;
 pub mod writer;
 
 use std::path::{Path, PathBuf};

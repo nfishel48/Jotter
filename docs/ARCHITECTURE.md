@@ -328,6 +328,7 @@ flowchart TB
 | Two passes | The first second or two of a cold filter is uncancelled, and in a meeting that is the greeting. Worth 5 dB on echo-only passages. |
 | tmp + rename | The tray's Quit calls `process::exit(0)`. A pass killed mid-write would otherwise leave a truncated file whose RIFF header claims it is complete. |
 | Bypass reasons in `meta.json` | A pass must be able to say "I decided not to, and here is why". No file and no explanation is indistinguishable from a crash. |
+| The mechanics in `audio/stage.rs`, ungated | Everything above except the cancelling itself is what *any* pass does — read the directory, write one artifact, record the outcome — and transcription is next. Each pass sits behind its own cargo feature, so the shared part is behind none of them: a transcriber must not have to build the WebRTC C++ stack to reuse a rename. |
 
 ---
 
@@ -433,7 +434,8 @@ explicitly rather than trusting the happy path.
 | `audio/meta.rs` | `Meta`, `TrackInfo`, `AecInfo`, `track_offset_secs()`, `preferred_mic_path()`, `timestamp_dir_name()`, the recording-directory path convention |
 | `audio/aec/mod.rs` | The AEC3 wrapper, `AecStats`, the frame-activity threshold (feature `aec`) |
 | `audio/aec/delay.rs` | Echo-delay measurement, the drift and swapped-track guards |
-| `audio/process.rs` | The offline pass: activity classification, bypass decisions, WAV I/O, `meta.json` rewrite |
+| `audio/stage.rs` | What every offline pass shares: the `Stage` trait and its already-processed check, `DeclineReason`, `write_atomic`, the WAV read/write helpers. Not feature-gated |
+| `audio/process.rs` | The echo-cancellation stage: activity classification, bypass decisions, `meta.json` rewrite (feature `aec`) |
 | `main.rs` | clap parsing and the GUI/CLI dispatch |
 | `cli.rs` | `record` / `devices` / `telemetry` subcommands and their console output |
 | `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |
