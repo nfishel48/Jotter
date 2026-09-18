@@ -16,6 +16,11 @@ pub mod process;
 // Ungated on purpose, unlike the passes built on it: the shared stage
 // mechanics must not sit behind any one stage's feature.
 pub mod stage;
+#[cfg(feature = "transcribe")]
+pub mod transcribe;
+// Ungated for the same reason `meta` is: reading a transcript and producing one
+// are different jobs, and only the second needs the inference stack.
+pub mod transcript;
 pub mod writer;
 
 use std::path::{Path, PathBuf};
