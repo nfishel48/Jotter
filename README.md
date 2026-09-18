@@ -10,15 +10,19 @@
 
 ---
 
+## Using Jotter
+Jotter tries to be simple for less technical users to use and still get the advantages of local only transcription and semantic search while still be less opinionated then then other tools and allowing those who want to change things.
+
 ## Getting a transcript
 
-Transcription runs on your machine — nothing is uploaded — but it needs a speech
-model, which is too large to ship inside the binary. Fetch it once:
+Transcription needs a speech model, which is too large to ship inside the binary. Fetch it once:
 
 ```bash
 jotter models pull      # ~630 MB, verified by checksum
 jotter models list      # what is known, and what is ready
 ```
+
+Default model is NVIDIA Parakeet TDT 0.6b v2 (English), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), which is linked statically. You may choose any model you want if you feel the need to switch.
 
 Then either transcribe an existing recording:
 
@@ -26,7 +30,7 @@ Then either transcribe an existing recording:
 jotter transcribe recordings/2026-09-15_14-32-08
 ```
 
-or have every recording transcribed as it finishes — tick **Transcribe
+or have every recording transcribed as it finishes tick **Transcribe
 recordings when they finish** in the settings pane, or for a single run:
 
 ```bash
@@ -40,10 +44,6 @@ segment already says whether it was you or the room:
 ```json
 { "start": 0.42, "end": 3.10, "track": "mic", "text": "morning all" }
 ```
-
-Default model is NVIDIA Parakeet TDT 0.6b v2 (English), run through
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), which is linked statically
-— there is nothing to install alongside the binary.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the passes fit together,
 [docs/AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) for the macOS permission story,
