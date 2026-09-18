@@ -9,3 +9,7 @@
 # (release.yml runs scripts/bump_version.sh and scripts/bundle.sh). Leaving
 # these ignored makes the release job fail with exit 127 at the version step.
 !scripts/*.sh
+
+# Scratch git worktrees for parallel agent sessions. Live checkouts, not source:
+# committing them would put a working tree inside the repository it checks out.
+/.claude/worktrees
