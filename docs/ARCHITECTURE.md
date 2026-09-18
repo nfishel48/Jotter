@@ -75,6 +75,18 @@ The two front ends are cargo features, both on by default:
 | CLI only | `cargo build --no-default-features --features cli` | CLI; no eframe/egui/tray-icon |
 | GUI only | `cargo build --no-default-features --features gui` | tray app; no clap |
 
+Each offline pass is a feature too, and for the same reason: `aec` builds
+WebRTC's AudioProcessing from C++ source, and `transcribe` links sherpa-onnx and
+an ONNX runtime. Turning either off removes that whole stack from the build
+rather than merely skipping a call.
+
+`transcribe` links **statically** — the sherpa-onnx crate's default — so the
+shipped artifact is still one binary with no shared library for a user to be
+missing. The cost is that the *build* downloads a prebuilt archive for the host
+target from GitHub releases. `SHERPA_ONNX_LIB_DIR` (a directory of libraries) or
+`SHERPA_ONNX_ARCHIVE_DIR` (a pre-downloaded archive) are the levers if that ever
+has to happen offline.
+
 `audio` is unconditional, so it must never depend on clap or eframe — that is why
 `cli.rs` mirrors `audio::Sources` in its own `ValueEnum` shim instead of deriving
 on the real type.
@@ -332,6 +344,66 @@ flowchart TB
 
 ---
 
+## Workflow 7 — Transcribing it
+
+Runs after echo cancellation, never before: the transcriber reads whichever mic
+track `preferred_mic_path` hands back, so it has to wait for that pass to write
+its verdict. Both tracks are transcribed **separately** and merged onto one
+timeline — the payoff for having captured them separately in the first place.
+
+```mermaid
+flowchart TB
+    S[echo pass done] --> G{transcribe_enabled<br/>and any track<br/>has audio?}
+    G -- no --> F[Status::Finished]
+    G -- yes --> M{model + VAD<br/>on disk?}
+    M -- no --> D["record transcript.declined<br/>= model_missing"]
+    M -- yes --> L[load recogniser + VAD once<br/>reused across both tracks]
+
+    L --> T1["mic: preferred_mic_path()"]
+    L --> T2["system: system.wav"]
+
+    subgraph per["per track — chunked, never whole"]
+        R[i16 → f32 → resample 48k→16k]
+        V[Silero VAD, 512-sample windows]
+        X[decode each segment<br/>as it appears, then drop it]
+        R --> V --> X
+    end
+
+    T1 --> per
+    T2 --> per
+
+    X --> SH["system segments += track_offset_secs()"]
+    SH --> MG[merge, sort by start]
+    MG --> E{any segments?}
+    E -- no --> D2["record transcript.declined<br/>= no_speech"]
+    E -- yes --> W[transcript.json.tmp<br/>then rename]
+    W --> MT[rewrite meta.json<br/>with counts and RTF]
+    D --> MT
+    D2 --> MT
+    MT --> F
+
+    style L fill:#e8f4ff
+    style D fill:#ffe8e8
+    style D2 fill:#ffe8e8
+    style W fill:#e8ffe8
+```
+
+### Why each step is the way it is
+
+| Step | Reason |
+| --- | --- |
+| Both tracks, separately | The whole argument for two tracks. "Was this me or everyone else" is answered by which file the audio came out of, with no inference at all. Diarization is then only left splitting the system track into individual people. |
+| After the echo pass | It reads whatever `preferred_mic_path` returns, which is not decided until that pass has recorded its numbers. Running first would transcribe audio the canceller was about to improve. |
+| System timestamps shifted | The two cpal streams start at different instants, so a time from `system.wav` and one from `mic.wav` are not comparable. Skip the shift and the reply lands before the remark. |
+| VAD rather than fixed windows | An hour will not go through a FastConformer encoder in one call, and a fixed window cuts mid-word. Speech-bounded segments give bounded memory, timestamps that mean something, and the segmentation diarization wants. |
+| Resample once, up front | The recogniser would resample for us; the VAD would not. Two components disagreeing about what a sample index means is a bug class worth designing out. |
+| Chunked conversion | An hour of 48 kHz mono as `f32` is 690 MB on top of the 346 MB the `i16` track already costs. Segments are decoded and dropped as they appear for the same reason. |
+| The model is never downloaded here | Fetching is `jotter models pull`, a deliberate act. A missing model is a decline with the command in the message. With telemetry off this binary still opens no socket unless asked. |
+| Half the cores, capped at 4 | This runs on the user's laptop right after a meeting, very likely while they are doing something else. Past four the encoder stops scaling anyway. |
+| `speaker` in the format from v1 | Diarization fills it in rather than changing a file shape other things have started reading. Omitted from the JSON while unset, so an undiarized transcript carries no misleading nulls. |
+
+---
+
 ## Recording state machine
 
 ```mermaid
@@ -339,10 +411,11 @@ stateDiagram-v2
     [*] --> Idle
     Idle --> Recording: toggle_recording()<br/>audio::start ok
     Idle --> Error: start failed<br/>(duplex / permission / io)
-    Recording --> Processing: stop() ok<br/>and aec_enabled
+    Recording --> Processing: stop() ok<br/>and a pass is enabled
     Recording --> Finished: stop() ok
     Recording --> Error: stop() failed
-    Processing --> Finished: pass done<br/>(applied or declined)
+    Processing --> Processing: echo pass done,<br/>transcription starts
+    Processing --> Finished: last pass done<br/>(applied or declined)
     Processing --> Error: pass failed
     Error --> Recording: retry
     Finished --> Recording: start again
@@ -372,12 +445,39 @@ stateDiagram-v2
 
 ```
 ~/Documents/Jotter/2026-09-15_14-32-08/
-├── mic.wav      you           48 kHz mono i16
-├── mic_aec.wav  you, echo removed — only when the pass ran and did not decline
-├── system.wav   everyone else  48 kHz mono i16
-└── meta.json    devices, rates, frames, stream_errors, first-callback instants,
-                 and what echo cancellation did or why it declined
+├── mic.wav         you           48 kHz mono i16
+├── mic_aec.wav     you, echo removed — only when the pass ran and did not decline
+├── system.wav      everyone else  48 kHz mono i16
+├── transcript.json both tracks, on one timeline — only when transcription ran
+└── meta.json       devices, rates, frames, stream_errors, first-callback instants,
+                    and what each offline pass did or why it declined
 ```
+
+Models are **not** in here. They are shared across every recording and live in
+the app data directory (`jotter models path`), fetched once by `jotter models
+pull`.
+
+`transcript.json`:
+
+```json
+{
+  "version": 1,
+  "model": "parakeet-tdt-0.6b-v2-int8",
+  "segments": [
+    { "start": 0.42, "end": 3.10, "track": "mic",    "text": "morning all" },
+    { "start": 3.20, "end": 8.04, "track": "system", "text": "morning, shall we start" }
+  ]
+}
+```
+
+`track` is the cheap half of speaker attribution and costs nothing: the
+operating system already separated the two signals. Segments also carry an
+optional `speaker`, omitted while unset, which a diarization pass will fill in
+for the `system` track without changing the shape of the file.
+
+Times are on the **mic track's** timeline. System segments have already been
+shifted onto it by `meta.track_offset_secs()`, so a reader never has to know the
+two streams started at different instants.
 
 Two tracks rather than one mixed file, because merging is lossy in ways you
 cannot undo: overlapping speech collapses (Whisper drops or garbles a speaker),
@@ -400,7 +500,13 @@ settled hold an absolute path from the GUI or a cwd-relative one from the CLI;
 `TrackInfo::resolve` takes the file name from those and resolves it against the
 directory the file was actually found in.
 
-Downstream this feeds `whisper → action_items.sh`, which is not wired up yet.
+Downstream, `transcript.json` is what feeds `action_items.sh` /
+`action_items_chunked.sh`. Those scripts read a line-per-utterance text format,
+so until a stage writes one directly:
+
+```bash
+jq -r '.segments[] | "[\(.start) - \(.end)] \(.track): \(.text)"' transcript.json
+```
 
 ---
 
@@ -420,6 +526,10 @@ explicitly rather than trusting the happy path.
 | `mic_aec.wav` sounds *worse* than `mic.wav` | A misaligned far-end reference adds uncorrelated energy instead of removing echo. Happens when the two tracks cannot be aligned at all — an idle macOS tap, or drifting clocks | `process::check_alignable` and the drift guard bypass rather than guess; the reason lands in `meta.json` as `aec.bypassed` |
 | Echo removal looks like it ate the speaker's voice | Frames were classified near-only while the echo tail was still decaying, so correctly removing it counted as damage | 200 ms far-end hangover in `process::classify` |
 | The window freezes for seconds after Stop | The pass ran on the egui thread | `App::start_processing` spawns it; `poll_processing` drains in `logic` |
+| Transcription never runs, or every recording records `model_missing` | The speech model was never downloaded. Transcription is the one pass that cannot work on a fresh install, which is why `transcribe_enabled` defaults off | `jotter models pull`; the settings pane says so before the box is ticked, and the decline names the command |
+| The transcript reads as two interleaved monologues, replies before remarks | System timestamps used raw instead of shifted onto the mic timeline — the two cpal streams start at different instants | `transcript::Segment::shifted`, applied in `transcribe::run` from `Meta::track_offset_secs` |
+| Transcription finds no speech in an obviously non-silent track | Audio fed to Silero VAD at the wrong rate. It is a 16 kHz model and our tracks are 48 kHz | Both tracks go through `LinearResampler` once before the detector *or* the recogniser sees them |
+| A transcript that reads like a stutter, one fragment per breath | The voice-activity pass cutting at every short pause, which also costs the recogniser its context | `MIN_SILENCE_SECS` — half a second is a turn boundary, less is someone thinking |
 
 ---
 
@@ -436,6 +546,10 @@ explicitly rather than trusting the happy path.
 | `audio/aec/delay.rs` | Echo-delay measurement, the drift and swapped-track guards |
 | `audio/stage.rs` | What every offline pass shares: the `Stage` trait and its already-processed check, `DeclineReason`, `write_atomic`, the WAV read/write helpers. Not feature-gated |
 | `audio/process.rs` | The echo-cancellation stage: activity classification, bypass decisions, `meta.json` rewrite (feature `aec`) |
+| `audio/transcript.rs` | The `transcript.json` format: `Transcript`, `Segment`, `Track`, and the merge onto one timeline. Not feature-gated — reading a transcript must not require the inference stack |
+| `audio/transcribe.rs` | The transcription stage: VAD segmentation, the `Transcriber` seam, decline decisions, `meta.json` rewrite (feature `transcribe`) |
+| `models.rs` | The speech-model catalogue, where models live on disk, and `resolve` (feature `transcribe`) |
+| `models/fetch.rs` | The verified downloader behind `jotter models pull`. The only code here that opens a socket for a reason other than telemetry |
 | `main.rs` | clap parsing and the GUI/CLI dispatch |
 | `cli.rs` | `record` / `devices` / `telemetry` subcommands and their console output |
 | `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |
