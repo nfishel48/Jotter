@@ -1,9 +1,6 @@
 pub mod settings;
 pub mod tray;
 
-// `Path` is only referenced by the echo-cancellation hook.
-#[cfg(feature = "aec")]
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -39,24 +36,48 @@ pub struct App {
     /// because it is a duration, and the clock can jump.
     started: Instant,
     recordings_this_session: u32,
-    /// Result of the echo-cancellation pass, which runs on its own thread.
+    /// The post-recording pass that is currently running, and the channel it
+    /// reports on. One channel for all stages rather than one per stage: the
+    /// passes run over a recording that is already saved, one at a time, so at
+    /// most one is ever live — and a second channel would mean a second thing to
+    /// poll, and a second way to forget to.
+    ///
+    /// The stage is held here rather than read back off `self.status`, which any
+    /// other error can overwrite while a pass is running; the message about a
+    /// failed pass has to name the right pass regardless.
     ///
     /// Off the egui thread because `RecordingHandle::stop` is called from it and
-    /// the pass takes seconds on a long meeting — blocking here would freeze the
+    /// a pass takes seconds on a long meeting — blocking here would freeze the
     /// window *and* the tray. Drained in `logic`, not `ui`: `logic` runs while
     /// the window is hidden, which is the normal case for a tray app, and it
     /// already re-arms its own repaint.
-    #[cfg(feature = "aec")]
-    processing: Option<std::sync::mpsc::Receiver<ProcessOutcome>>,
+    processing: Option<(settings::Stage, std::sync::mpsc::Receiver<StageEvent>)>,
 }
 
-/// What the processing thread sends back. The `Meta` is re-read from disk by the
-/// pass, so it carries the `aec` block the status pane wants to show.
-#[cfg(feature = "aec")]
-struct ProcessOutcome {
-    dir: PathBuf,
-    result: Result<Box<audio::meta::Meta>, String>,
-    props: Vec<crate::telemetry::Prop>,
+/// What a post-recording pass sends back.
+///
+/// An event stream rather than a single terminal value, because the passes do
+/// not all take the same order of time: echo cancellation is tens of seconds and
+/// has nothing useful to say in the middle, but transcribing a long meeting runs
+/// for minutes, and a channel that yields exactly one message can only say
+/// "still going" by saying nothing at all.
+///
+/// `pub` rather than private because this is the contract a stage's worker
+/// fills in — and with the `aec` feature off nothing in the crate constructs
+/// one, which would make a private enum dead code in a build CI compiles with
+/// `-D warnings`.
+pub enum StageEvent {
+    /// How far the pass has got, in `0.0..=1.0`. Optional for a stage: one that
+    /// cannot measure its own progress sends nothing until it is done.
+    Progress(f32),
+    /// The pass is over, one way or the other. The `Meta` is re-read from disk
+    /// by the pass, so it carries whatever block the pass wrote for the status
+    /// pane to show.
+    Done {
+        dir: PathBuf,
+        result: Result<Box<audio::meta::Meta>, String>,
+        props: Vec<crate::telemetry::Prop>,
+    },
 }
 
 impl App {
@@ -78,7 +99,6 @@ impl App {
             telemetry,
             started: Instant::now(),
             recordings_this_session: 0,
-            #[cfg(feature = "aec")]
             processing: None,
         };
         app.refresh_devices();
@@ -237,7 +257,7 @@ impl App {
     /// spinning up a thread to read two files and conclude that one of them is
     /// empty. `audio::process` re-checks all of this properly.
     #[cfg(feature = "aec")]
-    fn start_processing(&mut self, dir: &Path, meta: &audio::meta::Meta) -> bool {
+    fn start_processing(&mut self, dir: &std::path::Path, meta: &audio::meta::Meta) -> bool {
         if !self.settings.aec_enabled {
             return false;
         }
@@ -253,19 +273,23 @@ impl App {
         let thread_dir = dir.clone();
         std::thread::spawn(move || {
             let options = audio::process::ProcessOptions::default();
-            let outcome = match audio::process::run(&thread_dir, options) {
+            // `process::run` is one blocking call with nothing to report from
+            // inside it, so this stage sends no `Progress` and the pane shows
+            // its label alone — better than a percentage that never moves,
+            // which reads as stuck.
+            let event = match audio::process::run(&thread_dir, options) {
                 Ok(report) => {
                     let props = events::aec_props(&report, false);
                     let meta = audio::meta::Meta::read(&thread_dir.join("meta.json"))
                         .map(Box::new)
                         .map_err(|e| e.to_string());
-                    ProcessOutcome {
+                    StageEvent::Done {
                         dir: thread_dir,
                         result: meta,
                         props,
                     }
                 }
-                Err(e) => ProcessOutcome {
+                Err(e) => StageEvent::Done {
                     dir: thread_dir,
                     result: Err(e.to_string()),
                     props: vec![("failed", true.into())],
@@ -274,47 +298,68 @@ impl App {
             // A closed receiver means the app is shutting down, which is not an
             // error: the audio is already on disk and `jotter process` can redo
             // the pass.
-            let _ = tx.send(outcome);
+            let _ = tx.send(event);
         });
 
-        self.processing = Some(rx);
-        self.status = settings::Status::Processing { dir };
+        self.processing = Some((settings::Stage::Aec, rx));
+        self.status = settings::Status::Processing {
+            stage: settings::Stage::Aec,
+            dir,
+            progress: None,
+        };
         true
     }
 
-    /// Picks up the processing thread's result, if it has one yet.
-    #[cfg(feature = "aec")]
+    /// Picks up whatever the running pass has sent, if anything.
+    ///
+    /// Stage-agnostic on purpose: a pass that wants a progress bar gets one by
+    /// sending `Progress`, not by adding a field here and a poll site in
+    /// `logic`.
     fn poll_processing(&mut self) {
-        let Some(rx) = self.processing.as_ref() else {
+        let Some((stage, rx)) = self.processing.as_ref() else {
             return;
         };
-        let outcome = match rx.try_recv() {
-            Ok(outcome) => outcome,
-            // Disconnected without a message means the thread panicked. Report
+        let stage = *stage;
+        let event = match rx.try_recv() {
+            Ok(event) => event,
+            // Disconnected without a `Done` means the thread panicked. Report
             // it rather than leaving the pane saying "Removing speaker echo…"
             // for the rest of the session.
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.processing = None;
-                self.status = settings::Status::Error("echo removal stopped unexpectedly".into());
+                self.status = settings::Status::Error(format!(
+                    "{} stopped unexpectedly",
+                    stage.failure_label()
+                ));
                 return;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
         };
 
-        self.processing = None;
-        self.telemetry
-            .track(events::RECORDING_PROCESSED, &outcome.props);
-        self.status = match outcome.result {
-            Ok(meta) => settings::Status::Finished {
-                dir: outcome.dir,
-                meta,
-            },
-            // The recording itself is fine — only the extra pass failed — so the
-            // message says so rather than implying the audio is lost.
-            Err(e) => {
-                settings::Status::Error(format!("recording saved, but echo removal failed: {e}"))
+        match event {
+            // Only the number moves: the stage and the folder are already on the
+            // status, and a progress update says how far along the pass is, not
+            // what it is working on.
+            StageEvent::Progress(fraction) => {
+                if let settings::Status::Processing { progress, .. } = &mut self.status {
+                    *progress = Some(fraction);
+                }
             }
-        };
+            StageEvent::Done { dir, result, props } => {
+                self.processing = None;
+                self.telemetry.track(events::RECORDING_PROCESSED, &props);
+                self.status = match result {
+                    Ok(meta) => settings::Status::Finished { dir, meta },
+                    // The recording itself is fine — only the extra pass failed
+                    // — so the message says so rather than implying the audio is
+                    // lost.
+                    Err(e) => settings::Status::Error(format!(
+                        "recording saved, but {} failed: {e}",
+                        stage.failure_label()
+                    )),
+                };
+            }
+        }
     }
 
     /// Persist a change to the echo-cancellation preference.
@@ -527,24 +572,17 @@ impl eframe::App for App {
         // Here rather than in `ui` because a tray app spends most of its life
         // with the window hidden, and a pass whose result only lands when
         // someone opens the window would leave the status pane stale.
-        #[cfg(feature = "aec")]
         self.poll_processing();
 
         // eframe only calls `logic` when a repaint is pending, so the polling
         // loop has to keep itself alive. Without this the tray stops
         // responding as soon as the window is hidden.
-        let interval = if self.recording.is_some() {
+        //
+        // Faster while a recording or a pass is live: the elapsed clock has to
+        // tick, and the pane should update promptly when a pass reports.
+        let interval = if self.recording.is_some() || self.processing.is_some() {
             200
         } else {
-            #[cfg(feature = "aec")]
-            if self.processing.is_some() {
-                // Poll faster while a pass is running so the pane updates
-                // promptly when it finishes.
-                200
-            } else {
-                500
-            }
-            #[cfg(not(feature = "aec"))]
             500
         };
         ctx.request_repaint_after(Duration::from_millis(interval));
