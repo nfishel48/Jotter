@@ -13,14 +13,17 @@
 //! `mic_aec.wav`, and `system.wav` is an input to the estimate, never an output.
 //!
 //! This file holds the decisions — what to classify, when to decline — as pure
-//! functions over frame energies. The WAV plumbing that feeds them lives at the
-//! bottom.
+//! functions over frame energies. The mechanics underneath them are not
+//! AEC-specific and live in [`crate::audio::stage`]: the crash-safe write, the
+//! WAV plumbing, and the already-processed check that every later pass needs in
+//! exactly the same shape.
 
 use std::path::{Path, PathBuf};
 
 use crate::audio::aec;
 use crate::audio::aec::delay;
 use crate::audio::meta::{AecInfo, Meta};
+use crate::audio::stage::{DeclineReason, Stage, StageRecord, wav};
 
 /// Bumped whenever a change would give a different result for the same input,
 /// so a `mic_aec.wav` left over from an older build is detectable rather than
@@ -75,11 +78,8 @@ pub enum AecBypass {
     AlreadyProcessed,
 }
 
-impl AecBypass {
-    /// A stable, PII-free name. These reach telemetry and `meta.json`, so they
-    /// must never be free-form text — the same contract as
-    /// [`crate::audio::capture::CaptureError::kind`].
-    pub fn kind(&self) -> &'static str {
+impl DeclineReason for AecBypass {
+    fn kind(&self) -> &'static str {
         match self {
             Self::NoFarEnd => "no_far_end",
             Self::NoNearEnd => "no_near_end",
@@ -127,6 +127,33 @@ impl std::fmt::Display for AecBypass {
                 write!(f, "already processed — pass --force to redo it")
             }
         }
+    }
+}
+
+/// The echo-cancellation stage.
+///
+/// A unit struct: the pass keeps nothing between runs, and this exists only to
+/// hang the [`Stage`] implementation on, which is what tells the shared
+/// mechanics where in `meta.json` to look for AEC's own record.
+pub struct Aec;
+
+impl Stage for Aec {
+    type Decline = AecBypass;
+
+    fn name(&self) -> &'static str {
+        "aec"
+    }
+
+    fn version(&self) -> u32 {
+        AEC_VERSION
+    }
+
+    fn record<'m>(&self, meta: &'m Meta) -> Option<StageRecord<'m>> {
+        meta.aec.as_ref().map(|info| StageRecord {
+            version: info.version,
+            output: info.path.as_deref(),
+            declined: info.bypassed.as_deref(),
+        })
     }
 }
 
@@ -359,21 +386,15 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
     if let Err(bypass) = check_alignable(&meta) {
         return finish(dir, &meta_path, meta, report, Some(bypass), options);
     }
-    if output_path.exists() && !options.force && !options.dry_run {
-        let current = meta
-            .aec
-            .as_ref()
-            .is_some_and(|a| a.version == AEC_VERSION && a.path.is_some());
-        if current {
-            return finish(
-                dir,
-                &meta_path,
-                meta,
-                report,
-                Some(AecBypass::AlreadyProcessed),
-                options,
-            );
-        }
+    if output_path.exists() && !options.force && !options.dry_run && Aec.is_current(&meta) {
+        return finish(
+            dir,
+            &meta_path,
+            meta,
+            report,
+            Some(AecBypass::AlreadyProcessed),
+            options,
+        );
     }
 
     // Track paths in meta.json are relative to the repository root the CLI ran
@@ -381,8 +402,8 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
     let mic_path = dir.join("mic.wav");
     let far_path = dir.join("system.wav");
 
-    let mic = read_track(&mic_path)?;
-    let far = read_track(&far_path)?;
+    let mic = wav::read_track(&mic_path)?;
+    let far = wav::read_track(&far_path)?;
     let sample_rate = mic.sample_rate;
 
     let frame = sample_rate as usize * ENVELOPE_FRAME_MS / 1_000;
@@ -474,7 +495,7 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
     report.stats.reported_delay_ms = canceller.reported_delay_ms();
 
     debug_assert_eq!(out.len(), mic.samples.len());
-    write_track(&output_path, sample_rate, &out)?;
+    wav::write_track(&output_path, sample_rate, &out)?;
     report.output = Some(output_path);
 
     finish(dir, &meta_path, meta, report, None, options)
@@ -482,8 +503,8 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
 
 /// Measures the bulk delay from far-only stretches spread across the file.
 fn estimate_delay(
-    mic: &Track,
-    far: &Track,
+    mic: &wav::Track,
+    far: &wav::Track,
     mic_rms: &[f32],
     far_rms: &[f32],
     frame: usize,
@@ -646,43 +667,6 @@ fn cancel_stream(
     Ok(stats)
 }
 
-struct Track {
-    samples: Vec<i16>,
-    sample_rate: u32,
-}
-
-fn read_track(path: &Path) -> Result<Track, ProcessError> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let samples = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
-    Ok(Track {
-        samples,
-        sample_rate: spec.sample_rate,
-    })
-}
-
-/// Writes to a temporary sibling and renames on success.
-///
-/// The same discipline as `Settings::save_to`, and necessary here because the
-/// tray's Quit calls `process::exit(0)`: a pass killed mid-write would
-/// otherwise leave a truncated file whose RIFF header claims it is complete.
-fn write_track(path: &Path, sample_rate: u32, samples: &[i16]) -> Result<(), ProcessError> {
-    let tmp = path.with_extension("wav.tmp");
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(&tmp, spec)?;
-    for &sample in samples {
-        writer.write_sample(sample)?;
-    }
-    writer.finalize()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 /// Records the outcome in `meta.json` and returns the report.
 ///
 /// Always called, including on every bypass path, so a recording can always say
@@ -721,7 +705,7 @@ fn finish(
         far_only_secs: report.census.far_only,
         double_talk_secs: report.census.double_talk,
         far_gap_secs: report.far_gap_secs,
-        bypassed: report.bypass.map(|b| b.kind().to_string()),
+        bypassed: Aec.declined_kind(report.bypass.as_ref()),
     });
     meta.write(meta_path)?;
 

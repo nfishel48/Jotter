@@ -134,6 +134,10 @@ pub fn recording_props(meta: &crate::audio::meta::Meta) -> Vec<Prop> {
 /// successful while having made the recording worse.
 #[cfg(feature = "aec")]
 pub fn aec_props(report: &crate::audio::process::AecReport, dry_run: bool) -> Vec<Prop> {
+    // For `AecBypass::kind` below. The trait is ungated core code; this
+    // function is not, so the import is local rather than at file scope.
+    use crate::audio::stage::DeclineReason;
+
     let census = &report.census;
     let total = census.silence + census.near_only + census.far_only + census.double_talk;
 
