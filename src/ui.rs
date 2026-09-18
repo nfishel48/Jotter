@@ -239,6 +239,15 @@ impl App {
                 if self.start_processing(&active.dir, &meta) {
                     return;
                 }
+                // Reached when echo cancellation was off or had nothing to do.
+                // Transcription still runs: it reads whichever mic track
+                // `preferred_mic_path` hands back, and that is `mic.wav` when
+                // the canceller never ran. When the canceller *did* start, the
+                // chain is picked up in `poll_processing` instead.
+                #[cfg(feature = "transcribe")]
+                if self.start_transcribing(&active.dir, &meta) {
+                    return;
+                }
                 settings::Status::Finished {
                     dir: active.dir,
                     meta: Box::new(meta),
@@ -310,6 +319,71 @@ impl App {
         true
     }
 
+    /// Spawns the transcription pass, returning whether it started.
+    ///
+    /// Declines cheaply and silently for the two things knowable without
+    /// loading a 660 MB model: the user has not asked for this, or there is no
+    /// audio to read. Everything else — a model that is not downloaded, a
+    /// recording with no speech in it — is the stage's call, and it records the
+    /// reason in `meta.json` rather than vanishing.
+    #[cfg(feature = "transcribe")]
+    fn start_transcribing(&mut self, dir: &std::path::Path, meta: &audio::meta::Meta) -> bool {
+        if !self.settings.transcribe_enabled {
+            return false;
+        }
+        let any_audio = [meta.mic.as_ref(), meta.system.as_ref()]
+            .iter()
+            .any(|t| t.is_some_and(|t| t.frames > 0));
+        if !any_audio {
+            return false;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        let thread_dir = dir.clone();
+        std::thread::spawn(move || {
+            // Unlike the echo pass, this one has something to say while it runs
+            // — a long meeting takes minutes — so it sends `Progress`. The
+            // fraction is seconds of audio consumed, which moves from the first
+            // chunk rather than only near the end.
+            //
+            // A closed receiver means the app is shutting down. Ignored for the
+            // same reason the echo pass ignores it: the audio is already on
+            // disk, and `jotter transcribe` can redo the pass.
+            let progress_tx = tx.clone();
+            let options = audio::transcribe::TranscribeOptions::default();
+            let event = match audio::transcribe::run_with_progress(&thread_dir, options, &mut |f| {
+                let _ = progress_tx.send(StageEvent::Progress(f));
+            }) {
+                Ok(report) => {
+                    let props = events::transcript_props(&report);
+                    let meta = audio::meta::Meta::read(&thread_dir.join("meta.json"))
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    StageEvent::Done {
+                        dir: thread_dir,
+                        result: meta,
+                        props,
+                    }
+                }
+                Err(e) => StageEvent::Done {
+                    dir: thread_dir,
+                    result: Err(e.to_string()),
+                    props: vec![("failed", true.into())],
+                },
+            };
+            let _ = tx.send(event);
+        });
+
+        self.processing = Some((settings::Stage::Transcribe, rx));
+        self.status = settings::Status::Processing {
+            stage: settings::Stage::Transcribe,
+            dir,
+            progress: None,
+        };
+        true
+    }
+
     /// Picks up whatever the running pass has sent, if anything.
     ///
     /// Stage-agnostic on purpose: a pass that wants a progress bar gets one by
@@ -347,9 +421,20 @@ impl App {
             }
             StageEvent::Done { dir, result, props } => {
                 self.processing = None;
-                self.telemetry.track(events::RECORDING_PROCESSED, &props);
+                self.telemetry.track(stage.event(), &props);
                 self.status = match result {
-                    Ok(meta) => settings::Status::Finished { dir, meta },
+                    Ok(meta) => {
+                        // The chain: transcription reads the track the echo pass
+                        // just decided on, so it can only start once that pass
+                        // has finished and written its verdict to `meta.json`.
+                        // Only after `Aec` — otherwise a finished transcription
+                        // would start another one.
+                        #[cfg(all(feature = "aec", feature = "transcribe"))]
+                        if stage == settings::Stage::Aec && self.start_transcribing(&dir, &meta) {
+                            return;
+                        }
+                        settings::Status::Finished { dir, meta }
+                    }
                     // The recording itself is fine — only the extra pass failed
                     // — so the message says so rather than implying the audio is
                     // lost.
@@ -385,6 +470,36 @@ impl App {
         settings::AecView {
             enabled: false,
             available: false,
+        }
+    }
+
+    /// Persist a change to the transcription preference. As simple as
+    /// [`Self::set_aec`], and for the same reason.
+    fn set_transcribe(&mut self, on: bool) {
+        self.settings.transcribe_enabled = on;
+        self.persist_settings();
+    }
+
+    #[cfg(feature = "transcribe")]
+    fn transcribe_view(&self) -> settings::TranscribeView {
+        settings::TranscribeView {
+            enabled: self.settings.transcribe_enabled,
+            available: true,
+            // A `stat` per model file, on a pane that is only drawn while the
+            // window is open — which a tray app's is, rarely and briefly. Not
+            // worth caching, and a cache would go stale exactly when it matters:
+            // the moment someone finishes `jotter models pull` in a terminal.
+            model_ready: crate::models::DEFAULT_TRANSCRIPTION_MODEL.resolve().is_ok()
+                && crate::models::SILERO_VAD.resolve().is_ok(),
+        }
+    }
+
+    #[cfg(not(feature = "transcribe"))]
+    fn transcribe_view(&self) -> settings::TranscribeView {
+        settings::TranscribeView {
+            enabled: false,
+            available: false,
+            model_ready: false,
         }
     }
 
@@ -606,6 +721,7 @@ impl eframe::App for App {
 
         let telemetry_view = self.telemetry_view();
         let aec_view = self.aec_view();
+        let transcribe_view = self.transcribe_view();
         let action = settings::draw(
             ui,
             settings::View {
@@ -618,6 +734,7 @@ impl eframe::App for App {
                 root: &recordings_root(),
                 telemetry: telemetry_view,
                 aec: aec_view,
+                transcribe: transcribe_view,
             },
         );
 
@@ -641,6 +758,7 @@ impl eframe::App for App {
             }
             Some(settings::Action::SetTelemetry(on)) => self.set_telemetry(on),
             Some(settings::Action::SetAec(on)) => self.set_aec(on),
+            Some(settings::Action::SetTranscribe(on)) => self.set_transcribe(on),
             Some(settings::Action::DismissTelemetryNotice) => {
                 self.settings.telemetry_notice_seen = true;
                 self.persist_settings();
