@@ -16,6 +16,11 @@ pub mod audio;
 pub mod config;
 pub mod telemetry;
 
+/// The speech-model catalogue. Gated with the stage that needs it: a build
+/// without transcription has nothing to look a model up for.
+#[cfg(feature = "transcribe")]
+pub mod models;
+
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "gui")]

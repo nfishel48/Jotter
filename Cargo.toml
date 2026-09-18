@@ -12,7 +12,7 @@ name = "jotter"
 path = "src/main.rs"
 
 [features]
-default = ["gui", "cli", "telemetry", "aec"]
+default = ["gui", "cli", "telemetry", "aec", "transcribe"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
 # gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
 gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
@@ -28,6 +28,12 @@ telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
 # and the build needs no `meson`/`ninja` — the same kind of guarantee
 # `telemetry` gives for the network stack.
 aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
+# Offline transcription: turning a finished recording into a transcript. Like
+# `aec`, its own stage behind its own flag, so a build can drop the whole
+# inference stack. Off means no ONNX runtime is linked and the model catalogue
+# does not exist — and, since the catalogue is the only thing that knows any
+# download URLs, no model can be fetched either.
+transcribe = []
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
