@@ -139,10 +139,11 @@ impl RecordingHandle {
             ended_at: meta::to_unix_secs(SystemTime::now()),
             mic,
             system,
-            // Filled in later by the offline echo-cancellation pass, which runs
-            // off this thread. `stop()` stays as fast as it is today because the
-            // GUI calls it from the egui thread.
+            // Filled in later by the offline passes, which run off this thread.
+            // `stop()` stays as fast as it is today because the GUI calls it
+            // from the egui thread.
             aec: None,
+            transcript: None,
         };
         meta.write(&out_dir.join("meta.json"))?;
         Ok(meta)

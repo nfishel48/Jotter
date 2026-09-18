@@ -312,6 +312,7 @@ mod tests {
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);
@@ -399,6 +400,7 @@ mod tests {
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);
@@ -427,6 +429,7 @@ mod tests {
             mic: Some(track("mic", 240_000)),
             system: None,
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);

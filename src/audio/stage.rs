@@ -210,6 +210,7 @@ mod tests {
             mic: None,
             system: None,
             aec: stage,
+            transcript: None,
         }
     }
 
