@@ -18,17 +18,55 @@ pub struct DeviceRow {
 pub enum Status {
     Idle,
     Recording,
-    /// Echo cancellation is running over a recording that has already been
+    /// A post-recording pass is running over a recording that has already been
     /// saved. A separate state from `Recording` because the audio is safe on
     /// disk by this point — nothing is at risk if the app is quit.
+    ///
+    /// One variant for all stages rather than one per stage: the stages differ
+    /// only in what this pane calls them, so a variant each would mean another
+    /// arm in every `match` on `Status` for no new information.
     Processing {
+        stage: Stage,
         dir: PathBuf,
+        /// How far along, for a stage that can measure it. `None` covers both
+        /// "not started reporting yet" and "this stage never reports", which
+        /// render the same: the label without a number.
+        progress: Option<f32>,
     },
     Finished {
         dir: PathBuf,
         meta: Box<Meta>,
     },
     Error(String),
+}
+
+/// Which post-recording pass is running.
+///
+/// Echo cancellation is the only one so far; transcription, diarization and
+/// summarization are the ones this shape exists for. The wording lives here
+/// rather than at the call site so that a stage names itself once, in the module
+/// that owns the pane's text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Aec,
+}
+
+impl Stage {
+    /// What the pane calls the pass while it runs.
+    pub fn running_label(self) -> &'static str {
+        match self {
+            Stage::Aec => "Removing speaker echo…",
+        }
+    }
+
+    /// How the pass is named when it fails, in "recording saved, but {} failed".
+    /// A noun phrase, not a sentence, and deliberately narrow: the recording
+    /// itself is intact, and the message must not imply otherwise.
+    pub fn failure_label(self) -> &'static str {
+        match self {
+            Stage::Aec => "echo removal",
+        }
+    }
 }
 
 pub enum Action {
@@ -322,14 +360,21 @@ fn status(ui: &mut egui::Ui, status: &Status) -> Option<PathBuf> {
         Status::Recording => {
             ui.label("Recording…");
         }
-        Status::Processing { dir } => {
+        Status::Processing {
+            stage,
+            dir,
+            progress,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("Saved:");
                 if ui.link(dir.display().to_string()).clicked() {
                     reveal = Some(dir.clone());
                 }
             });
-            ui.label("Removing speaker echo…");
+            ui.label(match progress {
+                Some(fraction) => format!("{} {:.0}%", stage.running_label(), fraction * 100.0),
+                None => stage.running_label().to_string(),
+            });
             ui.label(
                 egui::RichText::new("The recording is already safe on disk.")
                     .small()
