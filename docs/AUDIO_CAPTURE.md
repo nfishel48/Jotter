@@ -290,6 +290,31 @@ whose own measurements do not clear the bar. The cost of being wrong about any
 given recording is one unused file. With headphones there is no echo to remove
 and it costs a few seconds of processing that finds nothing.
 
+## Transcription
+
+The pass after this one. Same contract — reads the directory, writes one file,
+records the outcome in `meta.json` under `transcript` — with two differences
+worth knowing here.
+
+It reads **both** tracks, separately, and merges them onto one timeline, so
+every segment says whether it was you or the room without any inference. That is
+the payoff for capturing two tracks in the first place. It also takes the mic
+track from `Meta::preferred_mic_path(dir)`, which means the echo pass's own
+verdict decides whether it gets `mic.wav` or `mic_aec.wav`.
+
+**Off by default**, unlike echo cancellation, and only because it cannot work on
+a fresh install: it needs a ~630 MB speech model.
+
+```bash
+jotter models pull                 # once, checksum-verified
+jotter transcribe recordings/<dir> # or tick the box in the settings pane
+```
+
+Turn it on in the settings pane, with `--transcribe`, or by setting
+`transcribe_enabled` to `true` in the config file. Enabled without a model, the
+pass declines with `model_missing` and says which command to run — it does not
+download anything on its own.
+
 ### What it achieves
 
 Measured on a 8m56s Linux/PipeWire meeting recorded on laptop speakers, by
@@ -373,17 +398,24 @@ src/audio/meta.rs       meta.json sidecar, timestamp_dir_name()
 src/audio/aec/mod.rs    WebRTC AEC3 wrapper, activity thresholds  (feature "aec")
 src/audio/aec/delay.rs  echo-delay measurement, drift and swap guards
 src/audio/process.rs    the offline pass: WAV I/O, two passes, meta rewrite
+src/audio/transcript.rs the transcript.json format  (not feature-gated)
+src/audio/transcribe.rs the transcription pass: VAD, decode, merge  (feature "transcribe")
+src/models.rs           speech-model catalogue and downloader  (feature "transcribe")
 ```
 
 Output per recording:
 
 ```
 recordings/<timestamp>/
-├── mic.wav      (you)
-├── mic_aec.wav  (you, with speaker echo removed — only if the pass ran)
-├── system.wav   (everyone else)
+├── mic.wav         (you)
+├── mic_aec.wav     (you, with speaker echo removed — only if the pass ran)
+├── system.wav      (everyone else)
+├── transcript.json (both tracks on one timeline — only if transcription ran)
 └── meta.json
 ```
+
+Speech models are shared across recordings and are **not** in here — see
+`jotter models path`.
 
 ### Design notes worth not re-deriving
 
@@ -391,9 +423,11 @@ recordings/<timestamp>/
   (Whisper drops or garbles a speaker), forces diarization to recover "me" from
   scratch instead of knowing it for free, and prevents per-track gain
   normalization. You can always mix down later; you can never un-mix.
-- **Native 48 kHz is preserved.** Resampling to Whisper's 16 kHz belongs at
-  transcription time with a real resampler; decimating in the audio callback
-  would alias and cost exactly the quality this is optimizing for.
+- **Native 48 kHz is preserved.** Resampling to the recogniser's 16 kHz belongs
+  at transcription time with a real resampler; decimating in the audio callback
+  would alias and cost exactly the quality this is optimizing for. That is now
+  where it happens — `audio/transcribe.rs` resamples once, before either the
+  voice-activity pass or the recogniser sees a sample.
 - **The callback never touches the filesystem.** It downmixes, converts to i16,
   and hands an owned buffer to a writer thread over an mpsc channel. Blocking a
   realtime audio thread on I/O causes dropouts.

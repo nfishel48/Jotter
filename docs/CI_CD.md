@@ -141,6 +141,25 @@ trusting the runner label, and `package-macos` asserts that the joined binary
 really contains both slices. `bundle.sh` takes `VERSION` from the environment
 when set, since the packaging job never applies the bump to its own checkout.
 
+Native-per-architecture also happens to be what `transcribe` wants. The
+sherpa-onnx build script picks a prebuilt static archive by host target
+(`osx-arm64`, `osx-x64`, `linux-x64`), so each leg gets the right one without
+being told — but a cross-build would silently fetch the runner's architecture,
+the same class of failure as v0.1.7.
+
+### The build now needs network access
+
+`transcribe` links sherpa-onnx statically, and its build script downloads the
+matching prebuilt archive from GitHub releases when `SHERPA_ONNX_LIB_DIR` is
+unset. That is a *build-time* fetch, not a runtime one: the shipped binary still
+has no shared library to find. If a build ever has to run offline, point
+`SHERPA_ONNX_LIB_DIR` at a directory of libraries or `SHERPA_ONNX_ARCHIVE_DIR` at
+a pre-downloaded archive.
+
+Speech models are **not** fetched by the build and are not in the release
+artifacts. They are ~630 MB, shared across recordings, and the user gets them
+with `jotter models pull` — see `docs/ARCHITECTURE.md`.
+
 ### Versioning
 
 Patch bumps are automatic: every push to `main` that passes tests releases the

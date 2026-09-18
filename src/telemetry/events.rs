@@ -16,6 +16,7 @@ pub const RECORDING_STARTED: &str = "recording_started";
 pub const RECORDING_COMPLETED: &str = "recording_completed";
 pub const RECORDING_FAILED: &str = "recording_failed";
 pub const RECORDING_PROCESSED: &str = "recording_processed";
+pub const RECORDING_TRANSCRIBED: &str = "recording_transcribed";
 
 pub const DEVICES_REFRESHED: &str = "devices_refreshed";
 pub const DEVICE_LIST_FAILED: &str = "device_list_failed";
@@ -195,6 +196,71 @@ pub fn aec_props(report: &crate::audio::process::AecReport, dry_run: bool) -> Ve
     props
 }
 
+/// Everything worth reporting about a transcription pass.
+///
+/// Same contract as [`recording_props`] and [`aec_props`]: this function picks,
+/// call sites do not assemble. `TranscriptReport` carries the output path — and
+/// the stage it came from has the transcript itself in memory — so funnelling
+/// through here keeps "no meeting content ever leaves the machine" a single
+/// place to review.
+///
+/// **No text, and nothing derived from text.** Not the words, not a sample, not
+/// a language guess. `words` is a count and `speech_secs` a duration; neither
+/// says anything about what was said. If a property here ever needs the
+/// transcript to compute, that is the signal it does not belong.
+///
+/// The figure worth having in aggregate is the real-time factor: it is the one
+/// number that decides whether this feature is usable on the hardware people
+/// actually own, and it cannot be measured anywhere but here.
+#[cfg(feature = "transcribe")]
+pub fn transcript_props(report: &crate::audio::transcribe::TranscriptReport) -> Vec<Prop> {
+    use crate::audio::stage::DeclineReason;
+
+    let mut props = vec![
+        // The model id is catalogue data, never free-form — see `models::Model`.
+        ("model", report.model_id.into()),
+        ("engine", report.engine.into()),
+        ("produced_transcript", report.output.is_some().into()),
+        (
+            "duration_bucket",
+            duration_bucket(report.audio_secs as f64).into(),
+        ),
+    ];
+
+    if let Some(decline) = &report.decline {
+        // From `kind()`, never `Display`: the human-facing message names the
+        // model and tells the user what to run.
+        props.push(("decline_reason", decline.kind().into()));
+        // A decline decided nothing about the audio, so the figures below would
+        // all be zero and would drag every average down with them.
+        return props;
+    }
+
+    props.push(("segments", report.segments.into()));
+    props.push(("mic_segments", report.mic_segments.into()));
+    props.push(("system_segments", report.system_segments.into()));
+    props.push(("words", report.words.into()));
+
+    // Fractions and ratios rather than raw seconds, for the reason `aec_props`
+    // gives: the shape of a meeting is the signal, an exact duration is closer
+    // to a fingerprint.
+    if report.audio_secs > 0.0 {
+        props.push((
+            "speech_pct",
+            ((report.speech_secs / report.audio_secs * 100.0).round() as i64).into(),
+        ));
+        // Scaled by 100 because `Prop` carries integers, and a bare `0` would
+        // lose the difference between "twice as fast as realtime" and "fifty
+        // times", which is the whole point of recording it.
+        props.push((
+            "realtime_factor_pct",
+            ((report.elapsed_secs / report.audio_secs * 100.0).round() as i64).into(),
+        ));
+    }
+
+    props
+}
+
 /// Property keys must be `&'static str`, and these are built from a fixed pair
 /// of labels, so the mapping is spelled out rather than formatted.
 fn prefixed(label: &str, suffix: &str) -> &'static str {
@@ -312,6 +378,7 @@ mod tests {
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);
@@ -399,6 +466,7 @@ mod tests {
             mic: Some(track("mic", 6_000_000)),
             system: Some(track("system", 0)),
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);
@@ -427,6 +495,7 @@ mod tests {
             mic: Some(track("mic", 240_000)),
             system: None,
             aec: None,
+            transcript: None,
         };
 
         let props = recording_props(&meta);
@@ -458,5 +527,113 @@ mod tests {
         }
         assert!(props.iter().any(|(k, _)| *k == "$app_version"));
         assert!(props.iter().any(|(k, _)| *k == "build_features"));
+    }
+
+    #[cfg(feature = "transcribe")]
+    fn transcript_report(
+        decline: Option<crate::audio::transcribe::TranscribeDecline>,
+    ) -> crate::audio::transcribe::TranscriptReport {
+        crate::audio::transcribe::TranscriptReport {
+            model_id: "parakeet-tdt-0.6b-v2-int8",
+            engine: "sherpa-onnx",
+            segments: 214,
+            mic_segments: 88,
+            system_segments: 126,
+            words: 3_104,
+            speech_secs: 487.5,
+            audio_secs: 1_062.0,
+            elapsed_secs: 73.2,
+            output: decline
+                .is_none()
+                .then(|| "/Users/nfishel/Documents/Jotter/2026-09-16/transcript.json".into()),
+            decline,
+        }
+    }
+
+    /// The PII contract for transcription, which carries the highest stakes of
+    /// the three: the stage this describes has the entire contents of a private
+    /// meeting in memory. `TranscriptReport` holds the output path, and the
+    /// recording directory is named after a timestamp under the user's home.
+    ///
+    /// Nothing derived from the transcript's *text* may appear either — no
+    /// sample, no language guess, no first words. `words` is a count and
+    /// `speech_secs` a duration, and neither says anything about what was said.
+    #[cfg(feature = "transcribe")]
+    #[test]
+    fn transcript_props_omit_the_path_and_everything_said() {
+        let rendered = format!("{:?}", transcript_props(&transcript_report(None)));
+
+        for leaked in ["nfishel", "Documents", "Jotter", ".json", "2026-09-16"] {
+            assert!(
+                !rendered.contains(leaked),
+                "{leaked:?} leaked into transcript props: {rendered}"
+            );
+        }
+
+        // Every value sent is a number, a bool, or a string from the catalogue.
+        // A free-form string appearing here is the shape a leak would take.
+        for (key, value) in transcript_props(&transcript_report(None)) {
+            if let Some(text) = value.as_str() {
+                assert!(
+                    ["parakeet-tdt-0.6b-v2-int8", "sherpa-onnx"].contains(&text)
+                        || key == "duration_bucket",
+                    "unexpected free-form value {text:?} under {key:?}"
+                );
+            }
+        }
+    }
+
+    /// A decline measured nothing, so reporting zero segments and a zero
+    /// real-time factor would drag every aggregate down with values that
+    /// describe a pass which never ran. The reason is the whole finding.
+    #[cfg(feature = "transcribe")]
+    #[test]
+    fn a_decline_reports_its_reason_and_no_measurements() {
+        use crate::audio::transcribe::TranscribeDecline;
+
+        let props = transcript_props(&transcript_report(Some(TranscribeDecline::ModelMissing {
+            model_id: "parakeet-tdt-0.6b-v2-int8",
+            files: 4,
+        })));
+        let get = |key: &str| {
+            props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        };
+
+        assert_eq!(
+            get("decline_reason"),
+            Some(serde_json::json!("model_missing"))
+        );
+        assert_eq!(get("produced_transcript"), Some(serde_json::json!(false)));
+        assert_eq!(get("segments"), None);
+        assert_eq!(get("words"), None);
+        assert_eq!(get("realtime_factor_pct"), None);
+
+        // And the reason is the stable `kind()`, never the sentence — which
+        // names the model and tells the user which command to run.
+        let rendered = format!("{props:?}");
+        assert!(!rendered.contains("jotter models pull"), "{rendered}");
+    }
+
+    /// The figure the whole event exists for: whether this is fast enough to be
+    /// usable on the hardware people own. Integer percent, because `Prop` values
+    /// are JSON numbers and a bare `0` would lose the difference between twice
+    /// realtime and fifty times.
+    #[cfg(feature = "transcribe")]
+    #[test]
+    fn the_realtime_factor_survives_as_an_integer() {
+        let props = transcript_props(&transcript_report(None));
+        let get = |key: &str| {
+            props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        };
+
+        // 73.2s of work for 1062s of audio.
+        assert_eq!(get("realtime_factor_pct"), Some(serde_json::json!(7)));
+        assert_eq!(get("speech_pct"), Some(serde_json::json!(46)));
     }
 }

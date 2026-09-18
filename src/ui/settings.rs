@@ -49,6 +49,7 @@ pub enum Status {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Aec,
+    Transcribe,
 }
 
 impl Stage {
@@ -56,6 +57,7 @@ impl Stage {
     pub fn running_label(self) -> &'static str {
         match self {
             Stage::Aec => "Removing speaker echo…",
+            Stage::Transcribe => "Transcribing…",
         }
     }
 
@@ -65,6 +67,19 @@ impl Stage {
     pub fn failure_label(self) -> &'static str {
         match self {
             Stage::Aec => "echo removal",
+            Stage::Transcribe => "transcription",
+        }
+    }
+
+    /// The telemetry event this pass's outcome is reported as.
+    ///
+    /// Here rather than at the call site so that adding a stage cannot silently
+    /// report it as an existing one: the `match` is exhaustive, and a new
+    /// variant fails to compile until it has been given a name of its own.
+    pub fn event(self) -> &'static str {
+        match self {
+            Stage::Aec => crate::telemetry::events::RECORDING_PROCESSED,
+            Stage::Transcribe => crate::telemetry::events::RECORDING_TRANSCRIBED,
         }
     }
 }
@@ -87,6 +102,9 @@ pub enum Action {
     /// That is what distinguishes both from the device pickers, which are
     /// `&mut` on `View` because they are not persisted at all.
     SetAec(bool),
+    /// The user ticked or unticked the transcription checkbox. An `Action` for
+    /// the same reason as [`Action::SetAec`].
+    SetTranscribe(bool),
 }
 
 pub struct View<'a> {
@@ -101,6 +119,24 @@ pub struct View<'a> {
     pub root: &'a Path,
     pub telemetry: TelemetryView,
     pub aec: AecView,
+    pub transcribe: TranscribeView,
+}
+
+/// Everything the transcription toggle needs to render.
+#[derive(Clone, Copy)]
+pub struct TranscribeView {
+    /// The stored preference — what the checkbox shows.
+    pub enabled: bool,
+    /// Whether this build can transcribe at all.
+    pub available: bool,
+    /// Whether the speech model has been downloaded.
+    ///
+    /// Separate from `available` because the two failures need different
+    /// sentences: a build compiled without transcription is nothing the user
+    /// can fix, and a missing model is one command away. Ticking the box with
+    /// no model is allowed — the pass will decline and say why — but the pane
+    /// should say so first rather than let someone discover it after a meeting.
+    pub model_ready: bool,
 }
 
 /// Everything the processing section needs to render.
@@ -187,8 +223,16 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
                 }
             });
 
+            // In the order the passes actually run, so the pane reads as the
+            // pipeline it describes: echo removal cleans the mic track, then
+            // transcription reads whichever track that left behind.
             ui.add_space(8.0);
             if let Some(chosen) = processing(ui, view.aec) {
+                action = Some(chosen);
+            }
+
+            ui.add_space(8.0);
+            if let Some(chosen) = transcription(ui, view.transcribe) {
                 action = Some(chosen);
             }
 
@@ -258,6 +302,42 @@ fn processing(ui: &mut egui::Ui, view: AecView) -> Option<Action> {
              never modified."
         } else {
             "This build was compiled without echo cancellation."
+        };
+        ui.label(egui::RichText::new(detail).small().weak());
+    });
+
+    action
+}
+
+/// The transcription toggle.
+///
+/// Off by default, unlike echo removal, and the pane has to say why or the
+/// asymmetry looks arbitrary: this one needs a download before it can do
+/// anything. The box stays tickable without the model — the pass declines and
+/// records the reason rather than failing — but someone should learn that here
+/// rather than after a meeting they cannot re-record.
+fn transcription(ui: &mut egui::Ui, view: TranscribeView) -> Option<Action> {
+    let mut action = None;
+
+    ui.add_enabled_ui(view.available, |ui| {
+        let mut enabled = view.enabled;
+        if ui
+            .checkbox(&mut enabled, "Transcribe recordings when they finish")
+            .changed()
+        {
+            action = Some(Action::SetTranscribe(enabled));
+        }
+
+        let detail = if !view.available {
+            "This build was compiled without transcription."
+        } else if view.model_ready {
+            "Runs on your machine — nothing is uploaded. Your microphone and \
+             everyone else's audio are transcribed separately, so the transcript \
+             already knows who was who."
+        } else {
+            "Needs a speech model, which is not downloaded yet. Run \
+             `jotter models pull` in a terminal (about 630 MB, once). Until then \
+             this is ticked but every recording will say the model is missing."
         };
         ui.label(egui::RichText::new(detail).small().weak());
     });

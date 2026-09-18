@@ -142,6 +142,56 @@ pub struct AecInfo {
     pub bypassed: Option<String>,
 }
 
+/// What the transcription pass did, or decided not to do.
+///
+/// Same discipline as [`AecInfo`], for the same reasons: `#[serde(default)]` on
+/// the struct so a block written by an older build still loads, `version` rather
+/// than field presence to tell a stale block from a current one, and every field
+/// either a number or a short fixed string so the whole struct is safe to report
+/// as telemetry except `path`.
+///
+/// The transcript itself is **not** here. It is a separate file — a meeting's
+/// worth of text has no business in a sidecar every stage reads and rewrites,
+/// and keeping it out means `meta.json` stays something you can `cat`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranscriptInfo {
+    /// Relative path of the transcript. Absent when the pass declined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Model and parameter generation, in the sense of [`AecInfo::version`].
+    pub version: u32,
+    /// Catalogue id of the model used, e.g. `"parakeet-tdt-0.6b-v2-int8"`.
+    /// Recorded because it is the single biggest determinant of the output, and
+    /// a transcript is worth redoing when it changes.
+    pub model: String,
+    /// The inference engine, e.g. `"sherpa-onnx"`.
+    pub engine: String,
+    /// Segments written, across both tracks.
+    pub segments: u32,
+    /// Segments attributed to you, and to everyone else. Split out because a
+    /// recording where one of these is zero is a recording where one track was
+    /// silent, which is worth seeing without opening the transcript.
+    pub mic_segments: u32,
+    pub system_segments: u32,
+    /// Whitespace-separated words across every segment. A crude figure, and
+    /// enough to tell "it transcribed the meeting" from "it transcribed a cough".
+    pub words: u32,
+    /// Seconds the voice-activity pass called speech, summed over both tracks.
+    pub speech_secs: f32,
+    /// Seconds of audio read, summed over both tracks.
+    pub audio_secs: f32,
+    /// Wall clock of the pass. With `audio_secs` this gives the real-time
+    /// factor, which is the number that decides whether this is usable on a
+    /// given machine.
+    pub elapsed_secs: f32,
+    /// `Some(reason)` when the pass looked and declined, from
+    /// `TranscribeDecline::kind()`. Same contract as [`AecInfo::bypassed`]: a
+    /// pass must always be able to say "I decided not to, and here is why".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined: Option<String>,
+}
+
 /// The ERLE below which the cancelled track is not worth preferring.
 ///
 /// Well under the 14-18 dB ceiling the reference recording's coherence implies,
@@ -167,6 +217,12 @@ pub struct Meta {
     /// `docs/AUDIO_CAPTURE.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aec: Option<AecInfo>,
+    /// Written by the transcription pass, which runs after the echo pass and
+    /// reads its verdict through [`Meta::preferred_mic_path`].
+    ///
+    /// `skip_serializing_if` for the same load-bearing reason as `aec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscriptInfo>,
 }
 
 impl Meta {
@@ -262,6 +318,24 @@ mod tests {
             mic: Some(track(mic)),
             system: Some(track(system)),
             aec: None,
+            transcript: None,
+        }
+    }
+
+    fn transcript_info() -> TranscriptInfo {
+        TranscriptInfo {
+            path: Some("transcript.json".into()),
+            version: 1,
+            model: "parakeet-tdt-0.6b-v2-int8".into(),
+            engine: "sherpa-onnx".into(),
+            segments: 214,
+            mic_segments: 88,
+            system_segments: 126,
+            words: 3_104,
+            speech_secs: 487.5,
+            audio_secs: 1_062.0,
+            elapsed_secs: 73.2,
+            declined: None,
         }
     }
 
@@ -327,6 +401,7 @@ mod tests {
     fn meta_json_round_trips() {
         let mut original = meta(Some(302_534_622_096_218), Some(302_534_627_429_470));
         original.aec = Some(aec_info(Some(12.4), Some(-0.2)));
+        original.transcript = Some(transcript_info());
 
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: Meta = serde_json::from_str(&json).expect("deserialize");
@@ -371,6 +446,7 @@ mod tests {
 
         let parsed: Meta = serde_json::from_str(json).expect("pre-AEC meta.json must load");
         assert!(parsed.aec.is_none());
+        assert!(parsed.transcript.is_none());
         assert_eq!(parsed.system.as_ref().expect("system track").frames, 0);
         assert_eq!(
             parsed.mic.as_ref().expect("mic track").first_callback_nanos,
@@ -514,11 +590,42 @@ mod tests {
         }
     }
 
-    /// Guards `"aec": null` appearing in every recording's `meta.json`, which
-    /// would invalidate the file shape quoted in `docs/AUDIO_CAPTURE.md`.
+    /// Guards `"aec": null` and `"transcript": null` appearing in every
+    /// recording's `meta.json`, which would invalidate the file shape quoted in
+    /// `docs/AUDIO_CAPTURE.md`. One test for both, because the mistake is a
+    /// single missing attribute and it is the same one either time.
     #[test]
-    fn aec_none_serializes_to_no_key_at_all() {
+    fn a_stage_that_has_not_run_serializes_to_no_key_at_all() {
         let json = serde_json::to_string(&meta(None, None)).expect("serialize");
         assert!(!json.contains("aec"), "unexpected aec key in {json}");
+        assert!(
+            !json.contains("transcript"),
+            "unexpected transcript key in {json}"
+        );
+    }
+
+    /// A decline writes a block with a reason and no `path`, and both halves
+    /// have to survive the round trip: the reason is what a re-run reconsiders,
+    /// and the absent path is what stops [`crate::audio::stage::Stage::is_current`]
+    /// reading a decline as finished work.
+    #[test]
+    fn a_declined_transcript_block_round_trips_with_no_path() {
+        let mut original = meta(None, None);
+        original.transcript = Some(TranscriptInfo {
+            path: None,
+            declined: Some("model_missing".into()),
+            ..transcript_info()
+        });
+
+        // Scoped to the transcript block: the tracks have a `path` of their own,
+        // and a substring check over the whole file would only ever see theirs.
+        let json = serde_json::to_string(&original.transcript).expect("serialize");
+        assert!(!json.contains("\"path\""), "a decline wrote a path: {json}");
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: Meta = serde_json::from_str(&json).expect("deserialize");
+        let block = parsed.transcript.expect("transcript block");
+        assert!(block.path.is_none());
+        assert_eq!(block.declined.as_deref(), Some("model_missing"));
     }
 }

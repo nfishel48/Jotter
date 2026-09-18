@@ -31,6 +31,95 @@ pub enum Command {
     Process(ProcessArgs),
     /// Show or change whether anonymous usage data is sent
     Telemetry(TelemetryArgs),
+    /// Download and inspect the speech models transcription needs
+    #[cfg(feature = "transcribe")]
+    Models(ModelsArgs),
+    /// Turn a finished recording into a transcript
+    #[cfg(feature = "transcribe")]
+    Transcribe(TranscribeArgs),
+}
+
+/// `jotter transcribe <dir>`.
+///
+/// The twin of `process`: touches no audio devices, so it needs no permissions
+/// and no macOS bundle, and it works on any recording directory — including
+/// ones made before transcription existed.
+#[cfg(feature = "transcribe")]
+#[derive(Args)]
+pub struct TranscribeArgs {
+    /// Recording directory, containing meta.json and at least one track
+    dir: PathBuf,
+
+    /// Report what would happen and write nothing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Re-transcribe even if a current transcript.json already exists
+    #[arg(long)]
+    force: bool,
+
+    /// Model id, from `jotter models list`
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
+
+    /// Which tracks to read. Both is the point of recording two.
+    #[arg(long, value_enum, default_value_t = TracksArg::Both)]
+    tracks: TracksArg,
+}
+
+/// Mirrors `audio::transcribe::Tracks` rather than deriving `ValueEnum` on it,
+/// for the reason `SourcesArg` exists: `audio` compiles in a CLI-free build and
+/// must not depend on clap.
+#[cfg(feature = "transcribe")]
+#[derive(Clone, Copy, ValueEnum)]
+enum TracksArg {
+    Mic,
+    System,
+    Both,
+}
+
+#[cfg(feature = "transcribe")]
+impl From<TracksArg> for audio::transcribe::Tracks {
+    fn from(arg: TracksArg) -> Self {
+        match arg {
+            TracksArg::Mic => Self::Mic,
+            TracksArg::System => Self::System,
+            TracksArg::Both => Self::Both,
+        }
+    }
+}
+
+/// `jotter models …`.
+///
+/// Its own subcommand rather than a flag on `transcribe`, because the point is
+/// that fetching a model is a separate, deliberate act. Transcription declines
+/// when a model is missing and says to run this; it never downloads 660 MB
+/// because a meeting ended.
+#[cfg(feature = "transcribe")]
+#[derive(Args)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    command: ModelsCommand,
+}
+
+#[cfg(feature = "transcribe")]
+#[derive(Subcommand)]
+pub enum ModelsCommand {
+    /// Show every known model and whether it is ready to use
+    List,
+    /// Print where models are kept
+    Path,
+    /// Download a model. Files already present are left alone.
+    Pull(PullArgs),
+}
+
+#[cfg(feature = "transcribe")]
+#[derive(Args)]
+pub struct PullArgs {
+    /// Model id, from `jotter models list`. Defaults to everything
+    /// transcription needs.
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
 }
 
 /// `jotter process <dir>`.
@@ -106,6 +195,16 @@ pub struct RecordArgs {
     #[cfg(feature = "aec")]
     #[arg(long, overrides_with = "aec")]
     no_aec: bool,
+
+    /// Transcribe the recording when it ends. Defaults to the stored setting;
+    /// `--no-transcribe` forces it off.
+    #[cfg(feature = "transcribe")]
+    #[arg(long, overrides_with = "no_transcribe")]
+    transcribe: bool,
+
+    #[cfg(feature = "transcribe")]
+    #[arg(long, overrides_with = "transcribe")]
+    no_transcribe: bool,
 }
 
 /// Mirrors `audio::Sources` rather than deriving `ValueEnum` on it directly:
@@ -154,6 +253,10 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::Record(args) => record(args, &telemetry),
         #[cfg(feature = "aec")]
         Command::Process(args) => process(args, &telemetry),
+        #[cfg(feature = "transcribe")]
+        Command::Models(args) => models(args),
+        #[cfg(feature = "transcribe")]
+        Command::Transcribe(args) => transcribe(args, &telemetry),
         Command::Telemetry(_) => unreachable!("handled above"),
     };
 
@@ -226,6 +329,14 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         false
     } else {
         Settings::load().aec_enabled
+    };
+    #[cfg(feature = "transcribe")]
+    let run_transcribe = if args.transcribe {
+        true
+    } else if args.no_transcribe {
+        false
+    } else {
+        Settings::load().transcribe_enabled
     };
 
     let config = RecordConfig {
@@ -303,6 +414,23 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
                 events::RECORDING_PROCESSED,
                 &events::aec_props(&report, false),
             );
+        }
+    }
+
+    // After echo cancellation, never before it: the transcriber reads whichever
+    // mic track `preferred_mic_path` hands back, and running first would mean
+    // transcribing audio the canceller was about to improve.
+    //
+    // A failure here is reported and swallowed rather than returned. The
+    // recording is on disk and is the result; `jotter transcribe <dir>` can
+    // redo this at any time, and exiting non-zero would imply the capture
+    // failed when it did not.
+    #[cfg(feature = "transcribe")]
+    if run_transcribe {
+        println!();
+        match audio::transcribe::run(&dir, Default::default()) {
+            Ok(report) => report_transcript(&report, false),
+            Err(e) => println!("  transcription failed: {e}"),
         }
     }
 
@@ -412,6 +540,230 @@ fn report_aec(report: &audio::process::AecReport, dry_run: bool) {
     match &report.output {
         Some(path) => println!("  wrote      {}", path.display()),
         None => println!("  wrote      nothing (dry run)"),
+    }
+}
+
+/// `jotter transcribe <dir>` — offline transcription.
+#[cfg(feature = "transcribe")]
+fn transcribe(
+    args: TranscribeArgs,
+    _telemetry: &Telemetry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use audio::transcribe::{TranscribeOptions, run_with_progress};
+    use std::io::{IsTerminal, Write};
+
+    // An unknown id is rejected here rather than silently falling back to the
+    // default inside the stage: someone who asked for a particular model and
+    // got another one has been lied to about what produced the transcript.
+    if let Some(id) = args.model.as_deref()
+        && crate::models::find(id).is_none()
+    {
+        return Err(format!("unknown model {id:?} — see `jotter models list`").into());
+    }
+
+    let options = TranscribeOptions {
+        dry_run: args.dry_run,
+        force: args.force,
+        model: args.model,
+        tracks: args.tracks.into(),
+    };
+
+    println!("transcribing {}", args.dir.display());
+
+    // Same rule as `models pull`: a percentage that rewrites itself is for a
+    // terminal, and is line noise in a log.
+    let interactive = std::io::stdout().is_terminal();
+    let mut last = u8::MAX;
+    let report = run_with_progress(&args.dir, options, &mut |fraction| {
+        if !interactive {
+            return;
+        }
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
+        if percent != last {
+            last = percent;
+            print!("\r  {percent}%");
+            let _ = std::io::stdout().flush();
+        }
+    })?;
+    if interactive && last != u8::MAX {
+        print!("\r");
+    }
+
+    report_transcript(&report, args.dry_run);
+    Ok(())
+}
+
+/// Prints what the pass decided, in the shape of [`report_aec`].
+#[cfg(feature = "transcribe")]
+fn report_transcript(report: &audio::transcribe::TranscriptReport, dry_run: bool) {
+    println!("  model      {} ({})", report.model_id, report.engine);
+    println!("  audio      {:.1}s across both tracks", report.audio_secs);
+
+    if let Some(decline) = &report.decline {
+        println!("  SKIPPED    {decline}");
+        return;
+    }
+
+    if dry_run {
+        println!("  would      transcribe (dry run — nothing was decoded)");
+        return;
+    }
+
+    // Both counts, always, even when one is zero: a meeting that transcribed
+    // only your own voice is a specific, recognisable failure — the system tap
+    // was idle — and a single total would hide it.
+    println!(
+        "  speech     {:.1}s in {} segment(s) — you {}, everyone else {}",
+        report.speech_secs, report.segments, report.mic_segments, report.system_segments
+    );
+    println!("  words      {}", report.words);
+
+    // The number that decides whether this is usable on a given machine.
+    let rtf = report.elapsed_secs / report.audio_secs.max(f32::MIN_POSITIVE);
+    println!(
+        "  took       {:.1}s ({rtf:.2}x realtime)",
+        report.elapsed_secs
+    );
+
+    match &report.output {
+        Some(path) => println!("  wrote      {}", path.display()),
+        None => println!("  wrote      nothing"),
+    }
+}
+
+/// `jotter models list | path | pull`.
+///
+/// Takes no `Telemetry`: which models someone has on disk is a statement about
+/// what they transcribe, and there is no aggregate worth that.
+#[cfg(feature = "transcribe")]
+fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::models;
+
+    match args.command {
+        ModelsCommand::Path => {
+            println!("{}", models::models_root().display());
+        }
+
+        ModelsCommand::List => {
+            println!("{:<28} {:>8}  {:<10} MODEL", "ID", "SIZE", "STATE");
+            for model in models::CATALOGUE {
+                // Every problem, not just the first, so "3 files missing" does
+                // not read the same as "one truncated file".
+                let state = match model.resolve() {
+                    Ok(_) => "ready".to_string(),
+                    Err(missing) => format!("{} missing", missing.problems.len()),
+                };
+                println!(
+                    "{:<28} {:>8}  {:<10} {}",
+                    model.id,
+                    human_bytes(model.bytes()),
+                    state,
+                    model.description
+                );
+            }
+            println!("\nkept in {}", models::models_root().display());
+        }
+
+        ModelsCommand::Pull(args) => {
+            // No id means "everything transcription needs", which is the
+            // recogniser *and* the voice-activity model — they are separate
+            // catalogue entries, and a recogniser alone cannot run the stage.
+            let wanted: Vec<&'static models::Model> =
+                match args.model.as_deref() {
+                    Some(id) => vec![models::find(id).ok_or_else(|| {
+                        format!("unknown model {id:?} — see `jotter models list`")
+                    })?],
+                    None => vec![models::DEFAULT_TRANSCRIPTION_MODEL, &models::SILERO_VAD],
+                };
+
+            let total: u64 = wanted.iter().map(|m| m.bytes()).sum();
+            println!(
+                "pulling {} model(s), up to {} into {}",
+                wanted.len(),
+                human_bytes(total),
+                models::models_root().display()
+            );
+
+            for model in wanted {
+                println!("\n{} — {}", model.id, model.description);
+                pull_one(model)?;
+            }
+            println!("\ndone");
+
+            // Transcription defaults off precisely because it cannot work
+            // before this command has been run, so the moment it can is the
+            // moment to say how to turn it on. Only when it is still off:
+            // repeating this at someone who has already enabled it is noise.
+            if !Settings::load().transcribe_enabled {
+                println!(
+                    "\ntranscribe an existing recording with `jotter transcribe <dir>`,\n\
+                     or a single run with `jotter record --transcribe`. To do it for\n\
+                     every recording, tick Transcribe in the settings pane."
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch one model, printing a line per asset.
+///
+/// The running percentage is rewritten in place with `\r`, and only when stdout
+/// is a terminal. Piped — a CI log, a `tee`, a file — carriage returns are not
+/// rewrites but ordinary bytes, and a 652 MB download would leave one
+/// unreadable line a hundred fragments long. There the per-asset summary line
+/// is the whole output, which is what a log wants anyway.
+#[cfg(feature = "transcribe")]
+fn pull_one(model: &'static crate::models::Model) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::models::fetch::{self, Progress};
+    use std::io::{IsTerminal, Write};
+
+    let interactive = std::io::stdout().is_terminal();
+    let mut last_percent = u64::MAX;
+
+    fetch::fetch(model, &mut |event| match event {
+        Progress::Skipped { asset } => println!("  {:<20} already present", asset.name),
+        Progress::Started { asset } => {
+            last_percent = u64::MAX;
+            if interactive {
+                print!("  {:<20} 0%", asset.name);
+                let _ = std::io::stdout().flush();
+            }
+        }
+        Progress::Bytes { asset, done } => {
+            if !interactive {
+                return;
+            }
+            let percent = done * 100 / asset.bytes.max(1);
+            if percent != last_percent {
+                last_percent = percent;
+                print!("\r  {:<20} {percent}%", asset.name);
+                let _ = std::io::stdout().flush();
+            }
+        }
+        Progress::Finished { asset } => {
+            let lead = if interactive { "\r" } else { "" };
+            println!("{lead}  {:<20} {} ✓", asset.name, human_bytes(asset.bytes));
+        }
+    })?;
+    Ok(())
+}
+
+/// Sizes a human can compare at a glance. Powers of 1024, one decimal.
+#[cfg(feature = "transcribe")]
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

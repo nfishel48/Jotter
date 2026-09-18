@@ -754,6 +754,7 @@ mod tests {
             mic,
             system,
             aec: None,
+            transcript: None,
         }
     }
 

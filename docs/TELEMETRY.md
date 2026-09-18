@@ -78,6 +78,7 @@ takes the other option.
 | `recording_completed` | Recording saved | `duration_bucket`, `track_count`, `stream_errors`, `{mic,system}_present`, `{mic,system}_captured_audio`, `{mic,system}_sample_rate`, `{mic,system}_source_channels`, `track_offset_ms` |
 | `recording_failed` | Recording could not start or finish | `phase`, `error_kind`, `cpal_kind`, `permission_shaped` |
 | `recording_processed` | Echo cancellation ran, or declined to | `dry_run`, `applied`, `delay_source`, `delay_ms`, `delay_segments`, `drift_ppm`, `aec3_delay_ms`, `far_gap_secs`, `duration_bucket`, `erle_db`, `near_gain_db`, `double_talk_gain_db`, `bypass_reason`, `double_talk_pct`, `far_only_pct` |
+| `recording_transcribed` | Transcription ran, or declined to | `model`, `engine`, `produced_transcript`, `duration_bucket`, `decline_reason`, `segments`, `mic_segments`, `system_segments`, `words`, `speech_pct`, `realtime_factor_pct` |
 | `devices_refreshed` | Device list read | `total`, `input_capable`, `loopback_capable`, `has_default_output` |
 | `device_list_failed` | Device list could not be read | `error_kind` |
 | `settings_opened` | Settings window shown | `trigger` |
@@ -106,6 +107,22 @@ measured, because a zero would be indistinguishable from "removed nothing".
 shape of a meeting is the useful signal, an exact duration is closer to a
 fingerprint. The path of the file written is never sent.
 
+The transcription properties carry the highest stakes of the lot, because the
+code that produces them has the entire contents of a private meeting in memory.
+So: **no text, and nothing derived from text.** Not the words, not a sample, not
+a first line, not a language guess. `words` is a count, `speech_pct` a
+percentage, `segments` a tally of how many stretches of speech were found —
+none of them says anything about what was said, and the transcript itself is
+never read to compute any of them. `model` is a catalogue id such as
+`parakeet-tdt-0.6b-v2-int8`, and `decline_reason` is a fixed identifier like
+`model_missing`, never the sentence shown to you. The path of the transcript is
+never sent.
+
+The one property that whole event exists for is `realtime_factor_pct`: how long
+transcribing took as a percentage of the audio's own length. It is the number
+that says whether this feature is usable on the hardware people actually own,
+and there is nowhere else it can be measured.
+
 ### Crash reports
 
 Panics and handled errors are sent to PostHog Error Tracking with a stack trace.
@@ -123,6 +140,8 @@ simply is not reported.
 ## What is never collected
 
 - Audio, in any form, whole or partial
+- **Transcript text, in any form, whole or partial** — no words, no excerpt, no
+  summary, and nothing computed from what was said
 - File names, folder names, or recording paths
 - **Device names or device ids.** A microphone is routinely named after its
   owner, so these are treated as personal data and never leave the machine

@@ -39,6 +39,16 @@ pub struct Settings {
     /// anyway. The raw `mic.wav` is never modified either way, so the worst case
     /// is a wasted second file.
     pub aec_enabled: bool,
+    /// Whether to transcribe each recording once it has been cleaned up.
+    ///
+    /// Off by default, and the odd one out for it — `aec_enabled` is on. The
+    /// difference is that echo cancellation works the moment the binary is
+    /// installed, and this cannot: it needs a 660 MB model the user has to fetch
+    /// deliberately with `jotter models pull`. Defaulting on would mean every
+    /// recording made before that ended with a decline recorded in its
+    /// `meta.json`, which is a confusing way to introduce a feature nobody has
+    /// asked for yet.
+    pub transcribe_enabled: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +68,9 @@ impl Default for Settings {
             // refuses to pass on a result whose own numbers do not clear the
             // bar. The cost of being wrong is one unused file.
             aec_enabled: true,
+            // See the field's own note: on would mean a decline recorded against
+            // every recording until someone runs `jotter models pull`.
+            transcribe_enabled: false,
         }
     }
 }
@@ -203,6 +216,7 @@ mod tests {
             // stores default values cannot tell a persisted field from a
             // defaulted one.
             aec_enabled: false,
+            transcribe_enabled: true,
         };
 
         settings.save_to(&path).unwrap();
@@ -230,6 +244,19 @@ mod tests {
     #[test]
     fn aec_defaults_to_on_because_the_pass_is_additive() {
         assert!(Settings::default().aec_enabled);
+    }
+
+    /// The counterpart, and the asymmetry is the point: transcription is just as
+    /// additive as echo cancellation, but unlike it cannot work on a fresh
+    /// install — it needs a 660 MB model fetched by hand. On by default would
+    /// mean every recording made before `jotter models pull` ends with a
+    /// decline recorded against it.
+    ///
+    /// The day this can succeed out of the box, this default is the thing to
+    /// revisit.
+    #[test]
+    fn transcription_defaults_to_off_because_it_needs_a_downloaded_model() {
+        assert!(!Settings::default().transcribe_enabled);
     }
 
     #[test]
