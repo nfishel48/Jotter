@@ -24,6 +24,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod fetch;
+
 /// What a file is *for*, as opposed to what it is called.
 ///
 /// Filenames are the model publisher's business and vary between repositories

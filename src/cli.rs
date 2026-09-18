@@ -31,6 +31,42 @@ pub enum Command {
     Process(ProcessArgs),
     /// Show or change whether anonymous usage data is sent
     Telemetry(TelemetryArgs),
+    /// Download and inspect the speech models transcription needs
+    #[cfg(feature = "transcribe")]
+    Models(ModelsArgs),
+}
+
+/// `jotter models …`.
+///
+/// Its own subcommand rather than a flag on `transcribe`, because the point is
+/// that fetching a model is a separate, deliberate act. Transcription declines
+/// when a model is missing and says to run this; it never downloads 660 MB
+/// because a meeting ended.
+#[cfg(feature = "transcribe")]
+#[derive(Args)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    command: ModelsCommand,
+}
+
+#[cfg(feature = "transcribe")]
+#[derive(Subcommand)]
+pub enum ModelsCommand {
+    /// Show every known model and whether it is ready to use
+    List,
+    /// Print where models are kept
+    Path,
+    /// Download a model. Files already present are left alone.
+    Pull(PullArgs),
+}
+
+#[cfg(feature = "transcribe")]
+#[derive(Args)]
+pub struct PullArgs {
+    /// Model id, from `jotter models list`. Defaults to everything
+    /// transcription needs.
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
 }
 
 /// `jotter process <dir>`.
@@ -154,6 +190,8 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::Record(args) => record(args, &telemetry),
         #[cfg(feature = "aec")]
         Command::Process(args) => process(args, &telemetry),
+        #[cfg(feature = "transcribe")]
+        Command::Models(args) => models(args),
         Command::Telemetry(_) => unreachable!("handled above"),
     };
 
@@ -412,6 +450,130 @@ fn report_aec(report: &audio::process::AecReport, dry_run: bool) {
     match &report.output {
         Some(path) => println!("  wrote      {}", path.display()),
         None => println!("  wrote      nothing (dry run)"),
+    }
+}
+
+/// `jotter models list | path | pull`.
+///
+/// Takes no `Telemetry`: which models someone has on disk is a statement about
+/// what they transcribe, and there is no aggregate worth that.
+#[cfg(feature = "transcribe")]
+fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::models;
+
+    match args.command {
+        ModelsCommand::Path => {
+            println!("{}", models::models_root().display());
+        }
+
+        ModelsCommand::List => {
+            println!("{:<28} {:>8}  {:<10} MODEL", "ID", "SIZE", "STATE");
+            for model in models::CATALOGUE {
+                // Every problem, not just the first, so "3 files missing" does
+                // not read the same as "one truncated file".
+                let state = match model.resolve() {
+                    Ok(_) => "ready".to_string(),
+                    Err(missing) => format!("{} missing", missing.problems.len()),
+                };
+                println!(
+                    "{:<28} {:>8}  {:<10} {}",
+                    model.id,
+                    human_bytes(model.bytes()),
+                    state,
+                    model.description
+                );
+            }
+            println!("\nkept in {}", models::models_root().display());
+        }
+
+        ModelsCommand::Pull(args) => {
+            // No id means "everything transcription needs", which is the
+            // recogniser *and* the voice-activity model — they are separate
+            // catalogue entries, and a recogniser alone cannot run the stage.
+            let wanted: Vec<&'static models::Model> =
+                match args.model.as_deref() {
+                    Some(id) => vec![models::find(id).ok_or_else(|| {
+                        format!("unknown model {id:?} — see `jotter models list`")
+                    })?],
+                    None => vec![models::DEFAULT_TRANSCRIPTION_MODEL, &models::SILERO_VAD],
+                };
+
+            let total: u64 = wanted.iter().map(|m| m.bytes()).sum();
+            println!(
+                "pulling {} model(s), up to {} into {}",
+                wanted.len(),
+                human_bytes(total),
+                models::models_root().display()
+            );
+
+            for model in wanted {
+                println!("\n{} — {}", model.id, model.description);
+                pull_one(model)?;
+            }
+            println!("\ndone");
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch one model, printing a line per asset.
+///
+/// The running percentage is rewritten in place with `\r`, and only when stdout
+/// is a terminal. Piped — a CI log, a `tee`, a file — carriage returns are not
+/// rewrites but ordinary bytes, and a 652 MB download would leave one
+/// unreadable line a hundred fragments long. There the per-asset summary line
+/// is the whole output, which is what a log wants anyway.
+#[cfg(feature = "transcribe")]
+fn pull_one(model: &'static crate::models::Model) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::models::fetch::{self, Progress};
+    use std::io::{IsTerminal, Write};
+
+    let interactive = std::io::stdout().is_terminal();
+    let mut last_percent = u64::MAX;
+
+    fetch::fetch(model, &mut |event| match event {
+        Progress::Skipped { asset } => println!("  {:<20} already present", asset.name),
+        Progress::Started { asset } => {
+            last_percent = u64::MAX;
+            if interactive {
+                print!("  {:<20} 0%", asset.name);
+                let _ = std::io::stdout().flush();
+            }
+        }
+        Progress::Bytes { asset, done } => {
+            if !interactive {
+                return;
+            }
+            let percent = done * 100 / asset.bytes.max(1);
+            if percent != last_percent {
+                last_percent = percent;
+                print!("\r  {:<20} {percent}%", asset.name);
+                let _ = std::io::stdout().flush();
+            }
+        }
+        Progress::Finished { asset } => {
+            let lead = if interactive { "\r" } else { "" };
+            println!("{lead}  {:<20} {} ✓", asset.name, human_bytes(asset.bytes));
+        }
+    })?;
+    Ok(())
+}
+
+/// Sizes a human can compare at a glance. Powers of 1024, one decimal.
+#[cfg(feature = "transcribe")]
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

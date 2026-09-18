@@ -33,7 +33,7 @@ aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 # inference stack. Off means no ONNX runtime is linked and the model catalogue
 # does not exist — and, since the catalogue is the only thing that knows any
 # download URLs, no model can be fetched either.
-transcribe = []
+transcribe = ["dep:ureq", "dep:sha2"]
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
@@ -89,6 +89,18 @@ webrtc-audio-processing = { version = "2.1", features = [
 # The config types live in their own crate and are only partly re-exported by the
 # parent, so `EchoCanceller` has to be named here.
 webrtc-audio-processing-config = { version = "2.1", optional = true }
+
+# `jotter models pull`, and nothing else. Deliberately not reqwest, which is
+# already in the tree via posthog-rs: that one arrives with tokio and a whole
+# async runtime, and this is a blocking download from a CLI command with nothing
+# to overlap it with. Default features give rustls over ring with bundled
+# webpki roots, so there is no system OpenSSL to link — the same single-binary
+# property the rest of the dependency list is chosen for.
+ureq = { version = "3.4", optional = true }
+# Verifying what was downloaded is what makes the download safe to trust later:
+# `Model::resolve` checks only sizes, because re-hashing 660 MB before every
+# transcription would cost more than the transcription.
+sha2 = { version = "0.11", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Cargo unions this with the base cpal dependency above, so Linux builds
