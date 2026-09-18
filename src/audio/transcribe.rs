@@ -135,7 +135,10 @@ const CHUNK: usize = 48_000;
 pub enum TranscribeDecline {
     /// The model is not on disk. By far the most likely reason on a first run,
     /// and the one with a one-line fix.
-    ModelMissing { model_id: String, files: usize },
+    ModelMissing {
+        model_id: &'static str,
+        files: usize,
+    },
     /// Neither track has any audio in it.
     NoAudio,
     /// Audio, but the detector found no speech anywhere in it.
@@ -235,7 +238,12 @@ impl Tracks {
 /// What the pass did. `decline` set means nothing was written.
 #[derive(Debug, Clone)]
 pub struct TranscriptReport {
-    pub model_id: String,
+    /// Catalogue data, so `&'static str` rather than `String`. Not a
+    /// nicety: telemetry property values are `&'static str` everywhere by
+    /// convention, which is what makes it hard to send something
+    /// user-shaped by accident, and a `String` here would be the first
+    /// exception to that.
+    pub model_id: &'static str,
     pub engine: &'static str,
     pub segments: u32,
     pub mic_segments: u32,
@@ -386,7 +394,7 @@ pub fn run_with_progress(
     };
 
     let mut report = TranscriptReport {
-        model_id: model.id.to_string(),
+        model_id: model.id,
         engine: model.engine,
         segments: 0,
         mic_segments: 0,
@@ -586,7 +594,7 @@ fn resolve(model: &'static Model) -> Result<Resolved, TranscribeDecline> {
             let files = recognizer.as_ref().err().map_or(0, |e| e.problems.len())
                 + vad.as_ref().err().map_or(0, |e| e.problems.len());
             Err(TranscribeDecline::ModelMissing {
-                model_id: model.id.to_string(),
+                model_id: model.id,
                 files,
             })
         }
@@ -748,7 +756,7 @@ fn finish(
             .and_then(|p| p.strip_prefix(dir).ok())
             .map(|p| p.to_string_lossy().into_owned()),
         version: TRANSCRIBE_VERSION,
-        model: report.model_id.clone(),
+        model: report.model_id.to_string(),
         engine: report.engine.to_string(),
         segments: report.segments,
         mic_segments: report.mic_segments,
@@ -829,7 +837,7 @@ mod tests {
     fn declines_are_recorded_by_kind_not_by_their_message() {
         assert_eq!(
             TranscribeDecline::ModelMissing {
-                model_id: "parakeet-tdt-0.6b-v2-int8".into(),
+                model_id: "parakeet-tdt-0.6b-v2-int8",
                 files: 4,
             }
             .kind(),
@@ -839,7 +847,7 @@ mod tests {
 
         // The sentence, unlike the kind, has to tell the user what to do.
         let message = TranscribeDecline::ModelMissing {
-            model_id: "parakeet-tdt-0.6b-v2-int8".into(),
+            model_id: "parakeet-tdt-0.6b-v2-int8",
             files: 4,
         }
         .to_string();
