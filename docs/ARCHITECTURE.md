@@ -386,10 +386,18 @@ you can never un-mix.
 
 `mic_aec.wav` is additive, never a replacement: `mic.wav` is the one artifact
 that cannot be recreated. Downstream consumers should call
-`Meta::preferred_mic_path()` rather than picking a file themselves — it returns
-the cancelled track only when the pass's own recorded numbers clear the bar, so
-a pass that ran and achieved nothing does not get fed to transcription just
-because it produced a file.
+`Meta::preferred_mic_path(dir)` rather than picking a file themselves — it
+returns the cancelled track only when the pass's own recorded numbers clear the
+bar, so a pass that ran and achieved nothing does not get fed to transcription
+just because it produced a file.
+
+**Every path in `meta.json` is relative to the recording directory**, which is
+why the accessors take that directory and hand back a resolved path. The folder
+is the unit that gets moved, copied and archived, so anything reaching outside
+it stops resolving the moment it is. `meta.json` files written before this was
+settled hold an absolute path from the GUI or a cwd-relative one from the CLI;
+`TrackInfo::resolve` takes the file name from those and resolves it against the
+directory the file was actually found in.
 
 Downstream this feeds `whisper → action_items.sh`, which is not wired up yet.
 
@@ -422,7 +430,7 @@ explicitly rather than trusting the happy path.
 | `audio/devices.rs` | Enumeration, direction classification, `can_loopback()`, default selection |
 | `audio/capture.rs` | `open_mic` / `open_loopback`, the duplex guard, `CaptureError` and its per-platform access hints |
 | `audio/writer.rs` | `TrackWriter` / `TrackSink`, the realtime→writer boundary, format conversion |
-| `audio/meta.rs` | `Meta`, `TrackInfo`, `AecInfo`, `track_offset_secs()`, `preferred_mic_path()`, `timestamp_dir_name()` |
+| `audio/meta.rs` | `Meta`, `TrackInfo`, `AecInfo`, `track_offset_secs()`, `preferred_mic_path()`, `timestamp_dir_name()`, the recording-directory path convention |
 | `audio/aec/mod.rs` | The AEC3 wrapper, `AecStats`, the frame-activity threshold (feature `aec`) |
 | `audio/aec/delay.rs` | Echo-delay measurement, the drift and swapped-track guards |
 | `audio/process.rs` | The offline pass: activity classification, bypass decisions, WAV I/O, `meta.json` rewrite |

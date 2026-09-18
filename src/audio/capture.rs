@@ -243,7 +243,14 @@ pub struct OpenStream {
 }
 
 /// Open the microphone as an ordinary input stream.
-pub fn open_mic(choice: DeviceChoice, path: &Path) -> Result<OpenStream, CaptureError> {
+///
+/// Takes the recording directory and a file name separately so the writer can
+/// keep the two in step — see [`TrackWriter::new`].
+pub fn open_mic(
+    choice: DeviceChoice,
+    dir: &Path,
+    file_name: &str,
+) -> Result<OpenStream, CaptureError> {
     let (device, info) = devices::resolve_mic(choice)?;
     let config = device
         .default_input_config()
@@ -251,7 +258,7 @@ pub fn open_mic(choice: DeviceChoice, path: &Path) -> Result<OpenStream, Capture
             source: Source::Mic,
             err,
         })?;
-    build(device, info, config, path, Source::Mic)
+    build(device, info, config, dir, file_name, Source::Mic)
 }
 
 /// Open a loopback capture of system audio.
@@ -283,7 +290,8 @@ pub fn open_mic(choice: DeviceChoice, path: &Path) -> Result<OpenStream, Capture
 ///    input config to ask for.
 pub fn open_loopback(
     choice: DeviceChoice,
-    path: &Path,
+    dir: &Path,
+    file_name: &str,
     allow_duplex: bool,
 ) -> Result<OpenStream, CaptureError> {
     let (device, info) = devices::resolve_system(choice)?;
@@ -300,14 +308,15 @@ pub fn open_loopback(
             source: Source::System,
             err,
         })?;
-    build(device, info, config, path, Source::System)
+    build(device, info, config, dir, file_name, Source::System)
 }
 
 fn build(
     device: Device,
     info: DeviceInfo,
     config: SupportedStreamConfig,
-    path: &Path,
+    dir: &Path,
+    file_name: &str,
     source: Source,
 ) -> Result<OpenStream, CaptureError> {
     let sample_format = config.sample_format();
@@ -316,7 +325,8 @@ fn build(
     let stream_config = config.config();
 
     let (track, sink) = TrackWriter::new(
-        path,
+        dir,
+        file_name,
         info.name.clone(),
         info.id.clone(),
         sample_rate,

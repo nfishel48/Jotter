@@ -80,7 +80,7 @@ pub fn start(config: RecordConfig) -> Result<RecordingHandle, CaptureError> {
     let mic = config
         .sources
         .wants_mic()
-        .then(|| capture::open_mic(config.mic, &config.out_dir.join("mic.wav")))
+        .then(|| capture::open_mic(config.mic, &config.out_dir, meta::MIC_NAME))
         .transpose()?;
 
     let system = config
@@ -89,7 +89,8 @@ pub fn start(config: RecordConfig) -> Result<RecordingHandle, CaptureError> {
         .then(|| {
             capture::open_loopback(
                 config.system,
-                &config.out_dir.join("system.wav"),
+                &config.out_dir,
+                meta::SYSTEM_NAME,
                 config.allow_duplex_system,
             )
         })

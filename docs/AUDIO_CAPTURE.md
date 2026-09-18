@@ -285,7 +285,7 @@ setting `aec_enabled` to `false` in the config file.
 
 Defaulting on is only defensible because the pass cannot damage a recording:
 `mic.wav` is never modified, a recording it cannot handle is declined with the
-reason recorded, and `Meta::preferred_mic_path()` refuses to pass on a result
+reason recorded, and `Meta::preferred_mic_path(dir)` refuses to pass on a result
 whose own measurements do not clear the bar. The cost of being wrong about any
 given recording is one unused file. With headphones there is no echo to remove
 and it costs a few seconds of processing that finds nothing.
