@@ -5,7 +5,7 @@
 //! convert to `i16`) and hands an owned buffer to a writer thread over a
 //! channel.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -18,7 +18,10 @@ use super::meta::TrackInfo;
 pub struct TrackWriter {
     tx: Option<Sender<Vec<i16>>>,
     thread: JoinHandle<Result<u64, hound::Error>>,
-    path: PathBuf,
+    /// Bare file name, not the full path: it is what lands in `meta.json`, and
+    /// everything there is relative to the recording directory so a recording
+    /// stays self-describing after it is moved or copied.
+    file_name: String,
     device_name: String,
     device_id: Option<String>,
     sample_rate: u32,
@@ -94,8 +97,14 @@ fn f32_to_i16(sample: f32) -> i16 {
 }
 
 impl TrackWriter {
+    /// Takes the recording directory and a file name rather than a whole path,
+    /// and does the join itself. The name written to `meta.json` is then the
+    /// same string that named the file on disk, so the two cannot disagree —
+    /// which is exactly how `meta.json` came to hold absolute paths from the
+    /// GUI and cwd-relative ones from the CLI.
     pub fn new(
-        path: &Path,
+        dir: &Path,
+        file_name: &str,
         device_name: String,
         device_id: Option<String>,
         sample_rate: u32,
@@ -108,7 +117,7 @@ impl TrackWriter {
             sample_format: hound::SampleFormat::Int,
         };
 
-        let writer = hound::WavWriter::create(path, spec)?;
+        let writer = hound::WavWriter::create(dir.join(file_name), spec)?;
         let (tx, rx): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = mpsc::channel();
 
         let thread = std::thread::spawn(move || {
@@ -139,7 +148,7 @@ impl TrackWriter {
             TrackWriter {
                 tx: Some(tx),
                 thread,
-                path: path.to_path_buf(),
+                file_name: file_name.to_string(),
                 device_name,
                 device_id,
                 sample_rate,
@@ -169,7 +178,7 @@ impl TrackWriter {
         let first = self.first_callback_nanos.load(Ordering::Relaxed);
 
         Ok(TrackInfo {
-            path: self.path.display().to_string(),
+            path: self.file_name,
             device_name: self.device_name,
             device_id: self.device_id,
             sample_rate: self.sample_rate,

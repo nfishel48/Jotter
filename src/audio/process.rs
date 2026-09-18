@@ -376,10 +376,24 @@ pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessErro
         }
     }
 
-    // Track paths in meta.json are relative to the repository root the CLI ran
-    // in, not to the recording directory, so resolve by convention instead.
-    let mic_path = dir.join("mic.wav");
-    let far_path = dir.join("system.wav");
+    let tracks = meta
+        .mic
+        .as_ref()
+        .zip(meta.system.as_ref())
+        .map(|(mic, system)| (mic.resolve(dir), system.resolve(dir)));
+    // `check_alignable` above already turned a missing track into a bypass, so
+    // this arm is unreachable; it exists so a future reordering cannot make it
+    // a panic.
+    let Some((mic_path, far_path)) = tracks else {
+        return finish(
+            dir,
+            &meta_path,
+            meta,
+            report,
+            Some(AecBypass::NoNearEnd),
+            options,
+        );
+    };
 
     let mic = read_track(&mic_path)?;
     let far = read_track(&far_path)?;
@@ -702,6 +716,8 @@ fn finish(
     }
 
     meta.aec = Some(AecInfo {
+        // Relative to `dir`, which is the convention every path in `meta.json`
+        // follows — see `meta::resolve_track_path`.
         path: report
             .output
             .as_ref()

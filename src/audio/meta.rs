@@ -7,10 +7,43 @@
 //! derive from host time, so their difference is the offset between the tracks.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+/// Filenames of the two captured tracks.
+///
+/// Here rather than in `audio::start` for the same reason as
+/// [`timestamp_dir_name`]: they are part of the `meta.json` contract, and the
+/// writer stores them verbatim as [`TrackInfo::path`].
+pub const MIC_NAME: &str = "mic.wav";
+pub const SYSTEM_NAME: &str = "system.wav";
+
+/// Turn a stored track path into one the caller can open.
+///
+/// **Every path in `meta.json` is relative to the recording directory** — a
+/// recording is a self-contained folder, and the moment a path reaches outside
+/// it the file stops being findable after the folder is moved, copied to
+/// another machine, or simply recorded by a CLI run whose working directory is
+/// long gone.
+///
+/// Older files do not honour that. Until this was fixed, `TrackInfo::path` was
+/// whatever `audio::start` was handed: absolute from the GUI, relative to the
+/// CLI's working directory from `jotter record --out some/dir`, while
+/// `AecInfo::path` in the same file was already a bare filename. So anything
+/// with a directory component is a pre-fix record, and only its file name is
+/// worth believing.
+fn resolve_track_path(dir: &Path, stored: &str) -> PathBuf {
+    let stored = Path::new(stored);
+    match stored.file_name() {
+        Some(name) => dir.join(name),
+        // `""`, `"."`, `".."` — nothing to resolve. Returning the directory
+        // keeps the result inside the recording, which joining the stored value
+        // would not.
+        None => dir.to_path_buf(),
+    }
+}
 
 /// `Deserialize` as well as `Serialize` because the offline echo-cancellation
 /// pass reads this file back — it runs long after `stop()` has returned, and
@@ -21,6 +54,9 @@ use serde::{Deserialize, Serialize};
 /// nothing overflows today, but the failure would be silent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackInfo {
+    /// File name of the track, relative to the recording directory. Resolve it
+    /// with [`TrackInfo::resolve`] rather than reading it directly — old
+    /// recordings hold a full path here.
     pub path: String,
     pub device_name: String,
     pub device_id: Option<String>,
@@ -40,6 +76,13 @@ pub struct TrackInfo {
     /// suspect — a stream that dies mid-meeting otherwise just yields a short
     /// file with no other indication.
     pub stream_errors: u64,
+}
+
+impl TrackInfo {
+    /// This track's file inside `dir`, the recording directory.
+    pub fn resolve(&self, dir: &Path) -> PathBuf {
+        resolve_track_path(dir, &self.path)
+    }
 }
 
 /// What the echo-cancellation pass did, or decided not to do.
@@ -138,14 +181,19 @@ impl Meta {
         serde_json::from_str(&json).map_err(io::Error::other)
     }
 
-    /// The mic track a transcriber should use.
+    /// The mic track a transcriber should use, inside `dir`.
     ///
     /// Returns the cancelled track only when the pass's own recorded numbers
     /// clear the bar, so the recording carries the evidence for whether the
     /// cancellation is worth using and no downstream consumer has to re-derive
     /// the policy. Falls back to the raw mic track, which is always present.
-    pub fn preferred_mic_path(&self) -> Option<&str> {
-        let raw = self.mic.as_ref().map(|t| t.path.as_str());
+    ///
+    /// Takes the recording directory and returns a resolved path because the
+    /// two branches read their filename from different fields, written by
+    /// different stages. Handing back a bare `&str` meant a caller's path
+    /// silently changed convention depending on whether the pass declined.
+    pub fn preferred_mic_path(&self, dir: &Path) -> Option<PathBuf> {
+        let raw = self.mic.as_ref().map(|t| t.resolve(dir));
         let Some(aec) = self.aec.as_ref() else {
             return raw;
         };
@@ -154,7 +202,11 @@ impl Meta {
         };
         let good = aec.erle_db.is_some_and(|e| e >= USABLE_ERLE_DB)
             && aec.near_gain_db.is_some_and(|g| g >= MAX_NEAR_LOSS_DB);
-        if good { Some(path) } else { raw }
+        if good {
+            Some(resolve_track_path(dir, path))
+        } else {
+            raw
+        }
     }
 
     /// Offset between the two tracks in seconds, if both produced callbacks.
@@ -191,7 +243,7 @@ mod tests {
 
     fn track(first_callback_nanos: Option<u128>) -> TrackInfo {
         TrackInfo {
-            path: "t.wav".into(),
+            path: MIC_NAME.into(),
             device_name: "Test".into(),
             device_id: None,
             sample_rate: 48_000,
@@ -319,10 +371,24 @@ mod tests {
 
         let parsed: Meta = serde_json::from_str(json).expect("pre-AEC meta.json must load");
         assert!(parsed.aec.is_none());
-        assert_eq!(parsed.system.expect("system track").frames, 0);
+        assert_eq!(parsed.system.as_ref().expect("system track").frames, 0);
         assert_eq!(
-            parsed.mic.expect("mic track").first_callback_nanos,
+            parsed.mic.as_ref().expect("mic track").first_callback_nanos,
             Some(22_186_248_869_375)
+        );
+
+        // Its paths are relative to a working directory that no longer exists,
+        // so they resolve against the recording directory the file was found
+        // in. `recordings/1789411995/mic.wav` must not be joined as-is.
+        let dir = Path::new("/archive/1789411995");
+        assert_eq!(
+            parsed.preferred_mic_path(dir),
+            Some(dir.join(MIC_NAME)),
+            "an old meta.json must still name a findable file"
+        );
+        assert_eq!(
+            parsed.system.expect("system track").resolve(dir),
+            dir.join(SYSTEM_NAME)
         );
     }
 
@@ -345,24 +411,29 @@ mod tests {
     /// looks like a finished job.
     #[test]
     fn prefers_the_cancelled_track_only_when_the_numbers_clear_the_bar() {
-        let raw = "t.wav";
+        let dir = Path::new("/recordings/2026-09-15_14-32-08");
+        let raw = dir.join(MIC_NAME);
 
         let no_pass = meta(None, None);
-        assert_eq!(no_pass.preferred_mic_path(), Some(raw));
+        assert_eq!(no_pass.preferred_mic_path(dir), Some(raw.clone()));
 
         let mut good = meta(None, None);
         good.aec = Some(aec_info(Some(12.4), Some(-0.2)));
-        assert_eq!(good.preferred_mic_path(), Some("mic_aec.wav"));
+        assert_eq!(
+            good.preferred_mic_path(dir),
+            Some(dir.join("mic_aec.wav")),
+            "a pass whose numbers clear the bar"
+        );
 
         // Cancelled almost nothing.
         let mut weak = meta(None, None);
         weak.aec = Some(aec_info(Some(2.1), Some(-0.2)));
-        assert_eq!(weak.preferred_mic_path(), Some(raw));
+        assert_eq!(weak.preferred_mic_path(dir), Some(raw.clone()));
 
         // Cancelled plenty, but ate the user's voice doing it.
         let mut damaging = meta(None, None);
         damaging.aec = Some(aec_info(Some(14.0), Some(-3.5)));
-        assert_eq!(damaging.preferred_mic_path(), Some(raw));
+        assert_eq!(damaging.preferred_mic_path(dir), Some(raw.clone()));
 
         // Declined, so there is no track to prefer.
         let mut bypassed = meta(None, None);
@@ -373,7 +444,74 @@ mod tests {
             near_gain_db: None,
             ..aec_info(None, None)
         });
-        assert_eq!(bypassed.preferred_mic_path(), Some(raw));
+        assert_eq!(bypassed.preferred_mic_path(dir), Some(raw));
+    }
+
+    /// Both branches must land in the recording directory. The bug this guards:
+    /// `preferred_mic_path` used to hand back `mic.path` verbatim — absolute
+    /// from the GUI — but `aec.path` as a bare filename, so the convention a
+    /// caller got depended on a decision taken in a different stage.
+    #[test]
+    fn both_branches_resolve_into_the_recording_directory() {
+        let dir = Path::new("/recordings/2026-09-15_14-32-08");
+
+        let mut declined = meta(None, None);
+        declined.mic = Some(TrackInfo {
+            path: "/Users/nick/Documents/Jotter/2026-09-15_14-32-08/mic.wav".into(),
+            ..track(None)
+        });
+        let mut applied = declined.clone();
+        applied.aec = Some(aec_info(Some(12.4), Some(-0.2)));
+
+        for m in [declined, applied] {
+            let path = m.preferred_mic_path(dir).expect("a mic track");
+            assert_eq!(
+                path.parent(),
+                Some(dir),
+                "{} escaped {dir:?}",
+                path.display()
+            );
+        }
+    }
+
+    /// Paths written before the convention was fixed. Each of these is a real
+    /// shape found on disk, and all three must resolve to the same file — a
+    /// silent mis-resolution would point transcription at a stale recording, or
+    /// at nothing at all.
+    #[test]
+    fn resolves_old_and_new_stored_paths_to_the_same_file() {
+        let dir = Path::new("/recordings/2026-09-15_14-32-08");
+        let expected = dir.join(MIC_NAME);
+
+        for stored in [
+            // Current: relative to the recording directory.
+            "mic.wav",
+            // GUI, before the fix: recordings_root()/<timestamp>/mic.wav.
+            "/Users/nick/Documents/Jotter/2026-09-15_14-32-08/mic.wav",
+            // CLI, before the fix: relative to whatever cwd it ran in.
+            "recordings/1789411995/mic.wav",
+        ] {
+            let info = TrackInfo {
+                path: stored.into(),
+                ..track(None)
+            };
+            assert_eq!(info.resolve(dir), expected, "stored as {stored:?}");
+        }
+    }
+
+    /// A stored value with no file name at all — corruption rather than an old
+    /// format, but `dir.join("..")` would walk out of the recording, which is
+    /// the one outcome worth ruling out.
+    #[test]
+    fn a_pathless_stored_value_stays_inside_the_recording() {
+        let dir = Path::new("/recordings/2026-09-15_14-32-08");
+        for stored in ["", ".", "..", "/"] {
+            let info = TrackInfo {
+                path: stored.into(),
+                ..track(None)
+            };
+            assert_eq!(info.resolve(dir), dir, "stored as {stored:?}");
+        }
     }
 
     /// Guards `"aec": null` appearing in every recording's `meta.json`, which
