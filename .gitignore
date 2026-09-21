@@ -9,6 +9,20 @@
 # (release.yml runs scripts/bump_version.sh and scripts/bundle.sh). Leaving
 # these ignored makes the release job fail with exit 127 at the version step.
 !scripts/*.sh
+# Same exemption for the benchmark harness, for the same reason: `bootstrap.sh`
+# is how anyone sets it up, and the `*.sh` rule above would silently swallow it.
+!benchmarks/*.sh
+
+# Downloaded speech corpora. Tens of gigabytes, and not ours to redistribute.
+/benchmarks/data
+# Manifests and raw hypotheses — regenerable from the corpora.
+/benchmarks/work
+# The harness's virtualenv, and the spelling map bootstrap.sh fetches into it.
+# `normalizer.lock.json` beside it is *not* ignored: pinning what everyone
+# normalises with is the point.
+/benchmarks/.venv
+/benchmarks/jbench/english.json
+__pycache__/
 
 # Scratch git worktrees for parallel agent sessions. Live checkouts, not source:
 # committing them would put a working tree inside the repository it checks out.

@@ -96,6 +96,25 @@ jobs:
       # The GUI and the CLI are cfg'd halves of one binary, so a change that
       # only compiles with both features on is easy to miss. RUSTFLAGS above
       # makes an import that is unused under one feature a hard failure here.
+      # The benchmark harness. Linux only: it is the same Python everywhere and
+      # paying for it three times buys nothing.
+      #
+      # This deliberately asserts NO word error rate. Corpora are tens of
+      # gigabytes and partly behind agreements, and CI cannot reach them. What
+      # it checks is that the harness works: the aligner against known answers,
+      # the normaliser's behaviour, manifest round-trips, and a smoke run over
+      # generated audio proving that a manifest reaches the binary, the binary
+      # writes parseable output, and `recording.py` still produces a meta.json
+      # that Jotter parses. That last one is the guard on the only place the
+      # harness duplicates a format the Rust owns.
+      - name: Benchmark harness
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo build --locked --features bench
+          ./benchmarks/bootstrap.sh
+          ./benchmarks/.venv/bin/python -m unittest discover -s benchmarks/tests -t benchmarks -v
+          ./benchmarks/bench smoke
+
       - name: Build (feature matrix)
         run: |
           cargo check --locked --no-default-features --features cli
@@ -113,3 +132,8 @@ jobs:
           # the only way that stays true is by checking it.
           cargo check --locked --no-default-features --features cli,aec
           cargo check --locked --no-default-features --features gui,aec
+          # `bench` builds the benchmark driver in `benchmarks/`. It is off by
+          # default and never shipped, which is exactly why it needs checking:
+          # nothing else in this matrix compiles `src/bin/bench.rs`, so it
+          # would rot silently until someone next tried to measure something.
+          cargo check --locked --no-default-features --features bench

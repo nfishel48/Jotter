@@ -1,0 +1,17 @@
+# Pinned, because an unpinned benchmark harness is a benchmark that changes
+# under you. Upgrading any of these is a decision to re-measure, not a chore.
+
+# Audio decoding. libsndfile is what gives us FLAC (LibriSpeech), SPHERE
+# (TED-LIUM) and MP3 (Common Voice) without a separate ffmpeg dependency.
+soundfile==0.13.1
+numpy==2.2.6
+
+# Room impulse response convolution, for the synthesised echo in the two-track
+# meeting benchmark and the AEC sweep. Nothing else uses it.
+scipy==1.15.3
+
+# For Whisper's EnglishTextNormalizer, and *only* for that — no torch, no
+# model downloads. This is what makes a WER here comparable to a published
+# one; see jbench/normalize.py. Without it the harness still runs and says
+# loudly that its numbers are not comparable.
+transformers==4.53.2
