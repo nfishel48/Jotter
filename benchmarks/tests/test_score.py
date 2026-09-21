@@ -6,16 +6,19 @@ cases whose answers are worked out by hand.
 """
 
 import unittest
+from unittest import mock
 
 from jbench import normalize
+from jbench import score as jbench_score
 from jbench.score import (
     Counts,
     Result,
     Utterance,
     align,
+    Task,
     bootstrap_interval,
-    character_rate,
     paired_bootstrap,
+    score_all,
     score_pair,
 )
 
@@ -91,13 +94,46 @@ class TestResult(unittest.TestCase):
         result = Result([self.utterance("a", "a", "a", audio_secs=10.0, elapsed_secs=2.5)])
         self.assertAlmostEqual(result.rtf, 0.25)
 
-    def test_character_rate_is_gentler_than_word_rate(self):
-        # One letter wrong in one word: a whole word error, a single character
-        # error. The two disagreeing this way is the diagnostic value of
-        # reporting both.
-        result = Result([self.utterance("a", "hello world", "hallo world")])
-        self.assertAlmostEqual(result.wer, 0.5)
-        self.assertLess(character_rate(result), 0.15)
+
+class TestScoreAll(unittest.TestCase):
+    def setUp(self):
+        self.normalizer = normalize.load("basic")
+
+    def tasks(self):
+        return [
+            Task(id="a", reference="hello world", hypothesis="hello world"),
+            Task(id="b", reference="one two three", hypothesis="one two"),
+            Task(id="c", reference="alpha", hypothesis="alpha beta"),
+        ]
+
+    def test_scores_every_task_in_the_order_given(self):
+        # Order is load-bearing: bootstrap_interval indexes into this list, so
+        # a run whose order depended on worker scheduling would produce a
+        # different confidence interval each time.
+        result = score_all(self.tasks(), self.normalizer, workers=1)
+        self.assertEqual([u.id for u in result.utterances], ["a", "b", "c"])
+        self.assertEqual(result.counts.deletions, 1)
+        self.assertEqual(result.counts.insertions, 1)
+
+    def test_parallel_agrees_with_serial(self):
+        tasks = self.tasks()
+        serial = score_all(tasks, self.normalizer, workers=1)
+        # Drop the threshold so three tiny utterances really do get fanned out
+        # across processes — otherwise this silently retests the serial path.
+        with mock.patch.object(jbench_score, "_PARALLEL_THRESHOLD_CELLS", 0):
+            parallel = score_all(tasks, self.normalizer, workers=2)
+        self.assertEqual(
+            [(u.id, u.counts) for u in serial.utterances],
+            [(u.id, u.counts) for u in parallel.utterances],
+        )
+
+    def test_progress_counts_up_to_the_total(self):
+        seen = []
+        score_all(self.tasks(), self.normalizer, workers=1, on_progress=lambda d, t: seen.append((d, t)))
+        self.assertEqual(seen, [(1, 3), (2, 3), (3, 3)])
+
+    def test_no_tasks_is_an_empty_result(self):
+        self.assertEqual(score_all([], self.normalizer).utterances, [])
 
 
 class TestIntervals(unittest.TestCase):

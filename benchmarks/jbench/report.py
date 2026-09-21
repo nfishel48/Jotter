@@ -80,7 +80,6 @@ def build(
         "corpus": corpus,
         "wer": result.wer,
         "wer_ci95": [low, high],
-        "cer": scoring.character_rate(result),
         "counts": {
             "utterances": len(result.utterances),
             "reference_words": counts.reference_length,
@@ -127,6 +126,52 @@ def build(
     }
 
 
+def diagnose(counts: dict) -> str:
+    """Name the dominant error type and say which half of the pipeline it implicates.
+
+    Spelled out rather than left to the reader, because the three types point
+    at different stages and the reflex on a bad WER is to blame the acoustic
+    model. Insertions especially: on per-speaker meeting channels they are
+    usually a reference-coverage problem, not a recognition one, and reading
+    them as recogniser error sends you off fixing the wrong thing.
+    """
+    errors = counts["substitutions"] + counts["deletions"] + counts["insertions"]
+    if not errors:
+        return "No errors: every reference word was recognised, with nothing added."
+
+    kinds = {k: counts[k] for k in ("substitutions", "deletions", "insertions")}
+    label, count = max(kinds.items(), key=lambda kv: kv[1])
+    share = count / errors
+
+    if share < 0.5:
+        return (
+            f"No single error type dominates — the largest is {label} at "
+            f"{share:.1%} of errors. That is ordinary recognition difficulty "
+            "spread across the corpus rather than one stage misbehaving."
+        )
+
+    meaning = {
+        "substitutions": (
+            "That points at the acoustic model: the words are being heard, and "
+            "heard wrong."
+        ),
+        "deletions": (
+            "That points at segmentation: speech the detector never passed on, "
+            "so the recogniser never had a chance at it."
+        ),
+        "insertions": (
+            "That means words with nothing in the reference to match them. "
+            "Either the recogniser is inventing text, or it is correctly "
+            "transcribing speech the reference does not cover — the usual cause "
+            "on per-speaker meeting channels, where each headset mic also picks "
+            "up the rest of the room. Check a worst-offender transcript below "
+            "before reading this as a model problem."
+        ),
+    }[label]
+
+    return f"**{label.capitalize()} dominate — {share:.1%} of all errors.** {meaning}"
+
+
 def to_markdown(summary: dict) -> str:
     counts = summary["counts"]
     speed = summary["speed"]
@@ -138,7 +183,7 @@ def to_markdown(summary: dict) -> str:
         f"# {summary['corpus']}",
         "",
         f"**WER {summary['wer']:.2%}**  (95% CI {low:.2%}–{high:.2%})",
-        f"CER {summary['cer']:.2%} · {counts['utterances']} utterances · "
+        f"{counts['utterances']} utterances · "
         f"{counts['reference_words']} reference words",
         "",
     ]
@@ -172,8 +217,7 @@ def to_markdown(summary: dict) -> str:
 
     lines += [
         "",
-        "Deletions dominating points at segmentation — speech the detector never "
-        "passed on. Substitutions dominating points at the acoustic model.",
+        diagnose(counts),
         "",
         "## Cost",
         "",
@@ -232,8 +276,8 @@ def write(summary: dict, directory: Path, stem: str) -> tuple[Path, Path]:
 def compare_table(summaries: list[dict]) -> str:
     """One table across several runs — the thing to paste into a README."""
     lines = [
-        "| corpus | segmentation | WER | 95% CI | CER | RTF | comparable |",
-        "| --- | --- | ---: | :---: | ---: | ---: | :---: |",
+        "| corpus | segmentation | WER | 95% CI | RTF | comparable |",
+        "| --- | --- | ---: | :---: | ---: | :---: |",
     ]
     for s in summaries:
         low, high = s["wer_ci95"]
@@ -242,7 +286,6 @@ def compare_table(summaries: list[dict]) -> str:
             f"| {s.get('bench', {}).get('segmentation', '?')} "
             f"| {s['wer']:.2%} "
             f"| {low:.2%}–{high:.2%} "
-            f"| {s['cer']:.2%} "
             f"| {s['speed']['real_time_factor']:.3f} "
             f"| {'yes' if s['comparable_to_published'] else 'no'} |"
         )

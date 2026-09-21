@@ -71,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true")
     p.add_argument("--normalizer", choices=["whisper", "basic"], default="whisper")
     p.add_argument("--tag", help="suffix for the result filename")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="processes to align on (default: every core; 1 to stay serial)",
+    )
 
     p = sub.add_parser("compare", help="is the difference between two results real?")
     p.add_argument("baseline", type=Path)
@@ -199,22 +205,25 @@ def cmd_score(args) -> int:
             file=sys.stderr,
         )
 
-    result = scoring.Result()
+    tasks = []
     for item_id, hypothesis in hypotheses.items():
         reference = references.get(item_id)
         if reference is None:
             print(f"warning: {item_id} has a hypothesis but no reference", file=sys.stderr)
             continue
-        result.utterances.append(
-            scoring.score_pair(
-                item_id,
-                reference["reference"],
-                hypothesis.get("text", ""),
-                normalizer,
+        tasks.append(
+            scoring.Task(
+                id=item_id,
+                reference=reference["reference"],
+                hypothesis=hypothesis.get("text", ""),
                 audio_secs=hypothesis.get("audio_secs", 0.0),
                 elapsed_secs=hypothesis.get("elapsed_secs", 0.0),
             )
         )
+
+    result = scoring.score_all(
+        tasks, normalizer, workers=args.workers, on_progress=_scoring_progress()
+    )
 
     if not result.utterances:
         print("nothing was scored", file=sys.stderr)
@@ -414,6 +423,28 @@ def cmd_aec(args) -> int:
     print(table)
     print(f"\nwritten: {paths.RESULTS / stem}.json/.md")
     return 0
+
+
+def _scoring_progress():
+    """A progress line for the alignment pass.
+
+    Scoring a meeting corpus is minutes of arithmetic with nothing to show for
+    it until the report lands, which from the outside is indistinguishable
+    from a hang. On stderr so that piping the report somewhere still works.
+    """
+    import time
+
+    started = time.monotonic()
+
+    def report(done: int, total: int) -> None:
+        sys.stderr.write(
+            f"\r  scoring {done}/{total}  {time.monotonic() - started:.0f}s"
+        )
+        if done == total:
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    return report
 
 
 def _decoded(items, corpus: str):
