@@ -70,9 +70,14 @@ pub const TRANSCRIBE_VERSION: u32 = 1;
 /// Filename of the transcript, written beside the audio.
 pub const OUTPUT_NAME: &str = "transcript.json";
 
+// The detector's settings below are `pub` so the benchmark harness can record
+// them alongside a word error rate. A WER measured under unknown segmentation
+// is not reproducible, and re-declaring the numbers in `benchmarks/` would let
+// the record drift away from what actually ran.
+
 /// What the models are trained on, and therefore what everything here is
 /// resampled to before anything looks at it.
-const ENGINE_RATE: i32 = 16_000;
+pub const ENGINE_RATE: i32 = 16_000;
 
 /// Samples per VAD call. Silero's own frame size at 16 kHz; feeding it anything
 /// else is not a tuning choice, it is the wrong input.
@@ -80,7 +85,7 @@ const VAD_WINDOW: usize = 512;
 
 /// How much audio the detector may hold while it makes up its mind. Has to
 /// exceed [`MAX_SPEECH_SECS`] or a long segment is truncated by its own buffer.
-const VAD_BUFFER_SECS: f32 = 60.0;
+pub const VAD_BUFFER_SECS: f32 = 60.0;
 
 /// Silence that ends a segment.
 ///
@@ -88,24 +93,24 @@ const VAD_BUFFER_SECS: f32 = 60.0;
 /// sentences, which costs the recogniser the context it uses to disambiguate and
 /// leaves a transcript that reads like a stutter. Half a second is a turn
 /// boundary; anything less is someone thinking.
-const MIN_SILENCE_SECS: f32 = 0.5;
+pub const MIN_SILENCE_SECS: f32 = 0.5;
 
 /// Speech shorter than this is not a segment. Filters coughs, keyboard noise and
 /// the click of a mute button without touching real one-word answers, which are
 /// longer than they feel.
-const MIN_SPEECH_SECS: f32 = 0.25;
+pub const MIN_SPEECH_SECS: f32 = 0.25;
 
 /// The longest a single segment may run before it is cut regardless of silence.
 ///
 /// A cap on the encoder's working set rather than a linguistic judgement:
 /// somebody who talks for four minutes without a half-second pause should not
 /// decide how much memory this takes.
-const MAX_SPEECH_SECS: f32 = 20.0;
+pub const MAX_SPEECH_SECS: f32 = 20.0;
 
 /// Silero's speech/not-speech threshold. Its default, and left alone — moving it
 /// trades missed speech against transcribed silence, and there is no evidence
 /// here for which way to go.
-const VAD_THRESHOLD: f32 = 0.5;
+pub const VAD_THRESHOLD: f32 = 0.5;
 
 // The two relationships between those numbers that are not free choices. Checked
 // at compile time rather than in a test, because they are properties of the
@@ -356,7 +361,7 @@ impl Transcriber for ParakeetTranscriber {
 /// the user's own laptop, very likely while they are doing something else, so
 /// taking every core would be rude — and past four the encoder stops scaling
 /// anyway.
-fn threads() -> i32 {
+pub fn threads() -> i32 {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
@@ -602,9 +607,12 @@ fn resolve(model: &'static Model) -> Result<Resolved, TranscribeDecline> {
 }
 
 /// What one track yielded.
-struct TrackResult {
-    segments: Vec<Segment>,
-    speech_secs: f32,
+///
+/// `pub` because [`transcribe_track`] has a second caller outside this module —
+/// see the note there.
+pub struct TrackResult {
+    pub segments: Vec<Segment>,
+    pub speech_secs: f32,
 }
 
 /// Read one track, cut it at the pauses, and decode each piece.
@@ -614,7 +622,13 @@ struct TrackResult {
 /// segment is decoded and dropped as it appears rather than collected first.
 /// That keeps the peak cost of an hour-long meeting the `i16` track plus a
 /// working set, instead of three copies of it at three sample rates.
-fn transcribe_track(
+///
+/// `pub` for the `bench` binary, which measures word error rate over a corpus
+/// and has to run *this* function rather than a copy of it: a benchmark of a
+/// reimplementation of the pipeline measures the reimplementation. The same
+/// reasoning that moved the shared stage mechanics into [`crate::audio::stage`]
+/// rather than duplicating them into the transcription pass.
+pub fn transcribe_track(
     path: &Path,
     track: Track,
     transcriber: &dyn Transcriber,

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Entry point. Uses the harness venv if bootstrap.sh has been run, and the
+# ambient python otherwise — so `bench smoke` still works on a machine that
+# only wants to check the harness, and fails with a clear ImportError rather
+# than a confusing one if a corpus command needs a dependency it lacks.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python="$here/.venv/bin/python"
+[ -x "$python" ] || python="$(command -v python3)"
+
+cd "$here"
+exec "$python" -m jbench "$@"

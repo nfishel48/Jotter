@@ -11,6 +11,15 @@ path = "src/lib.rs"
 name = "jotter"
 path = "src/main.rs"
 
+# The benchmark driver. A separate binary rather than a `jotter` subcommand
+# because it is developer tooling: nothing a user installs should carry it, and
+# `required-features` on a non-default feature is what guarantees that — the
+# release bundle builds the default set and never sees this file.
+[[bin]]
+name = "jotter-bench"
+path = "src/bin/bench.rs"
+required-features = ["bench"]
+
 [features]
 default = ["gui", "cli", "telemetry", "aec", "transcribe"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
@@ -34,6 +43,26 @@ aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 # does not exist — and, since the catalogue is the only thing that knows any
 # download URLs, no model can be fetched either.
 transcribe = ["dep:sherpa-onnx", "dep:ureq", "dep:sha2"]
+# The `jotter-bench` binary: word error rate over a speech corpus, for
+# `benchmarks/`. Off by default and never shipped.
+#
+# It exists because `jotter transcribe` is the wrong shape for a corpus. That
+# command takes a recording directory and builds a recogniser per call, and
+# LibriSpeech test-clean is 2620 utterances — reloading 660 MB of model that
+# many times is hours of the benchmark measuring its own startup. This loads the
+# model once and walks a manifest.
+#
+# What it must not become is a second implementation of the pipeline: a
+# benchmark of a reimplementation measures the reimplementation. It calls
+# `audio::transcribe::transcribe_track`, the same function the real pass calls,
+# which is why that function is `pub`. `benchmarks/bench verify` checks the two
+# paths still agree.
+#
+# Implies `cli` rather than a bare `dep:clap` so that `--features bench` builds
+# the whole workspace: `src/main.rs` refuses to compile with neither front end,
+# so enabling only clap would make the obvious command fail on the *other*
+# binary.
+bench = ["transcribe", "cli"]
 
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
