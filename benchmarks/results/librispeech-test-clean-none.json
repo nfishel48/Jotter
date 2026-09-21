@@ -1,0 +1,141 @@
+{
+  "corpus": "librispeech-test-clean",
+  "wer": 0.013888888888888888,
+  "wer_ci95": [
+    0.0,
+    0.05084745762711865
+  ],
+  "counts": {
+    "utterances": 5,
+    "reference_words": 72,
+    "hits": 71,
+    "substitutions": 1,
+    "deletions": 0,
+    "insertions": 0
+  },
+  "speed": {
+    "audio_secs": 28.2300626,
+    "elapsed_secs": 3.4663886699999997,
+    "real_time_factor": 0.12279068307840024
+  },
+  "normalizer": {
+    "mode": "whisper",
+    "detail": "transformers 4.53.2, english.json sha256:6607f948be98 (1739 entries)",
+    "comparable": true
+  },
+  "comparable_to_published": true,
+  "bench": {
+    "record": "provenance",
+    "jotter_version": "0.1.13",
+    "transcribe_version": 1,
+    "model_id": "parakeet-tdt-0.6b-v2-int8",
+    "engine": "sherpa-onnx",
+    "segmentation": "none",
+    "threads": 4,
+    "engine_rate": 16000,
+    "vad": {
+      "threshold": 0.5,
+      "min_silence_secs": 0.5,
+      "min_speech_secs": 0.25,
+      "max_speech_secs": 20.0
+    },
+    "items": 5
+  },
+  "run": {
+    "when": "2026-09-21T21:14:29+00:00",
+    "git_sha": "0cba995bf8e9fe7140a0e5d7724d386a59c46680",
+    "git_dirty": true,
+    "host": {
+      "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "processor": "arm",
+      "python": "3.13.7"
+    },
+    "partial": false,
+    "limit": null
+  },
+  "per_utterance": [
+    {
+      "id": "1089-134686-0000",
+      "counts": {
+        "hits": 28,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0
+      }
+    },
+    {
+      "id": "1089-134686-0001",
+      "counts": {
+        "hits": 8,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0
+      }
+    },
+    {
+      "id": "1089-134686-0002",
+      "counts": {
+        "hits": 18,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0
+      }
+    },
+    {
+      "id": "1089-134686-0003",
+      "counts": {
+        "hits": 7,
+        "substitutions": 0,
+        "deletions": 0,
+        "insertions": 0
+      }
+    },
+    {
+      "id": "1089-134686-0004",
+      "counts": {
+        "hits": 10,
+        "substitutions": 1,
+        "deletions": 0,
+        "insertions": 0
+      }
+    }
+  ],
+  "worst": [
+    {
+      "id": "1089-134686-0004",
+      "errors": 1,
+      "wer": 0.09090909090909091,
+      "reference": "number 10 fresh nelly is waiting on you good night husband",
+      "hypothesis": "number 10 fresh nellie is waiting on you good night husband"
+    },
+    {
+      "id": "1089-134686-0000",
+      "errors": 0,
+      "wer": 0.0,
+      "reference": "he hoped there would be stew for dinner turnips and carrots and bruised potatoes and fat mutton pieces to be ladled out in thick peppered flour fattened sauce",
+      "hypothesis": "he hoped there would be stew for dinner turnips and carrots and bruised potatoes and fat mutton pieces to be ladled out in thick peppered flour fattened sauce"
+    },
+    {
+      "id": "1089-134686-0001",
+      "errors": 0,
+      "wer": 0.0,
+      "reference": "stuff it into you his belly counseled him",
+      "hypothesis": "stuff it into you his belly counseled him"
+    },
+    {
+      "id": "1089-134686-0002",
+      "errors": 0,
+      "wer": 0.0,
+      "reference": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels",
+      "hypothesis": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels"
+    },
+    {
+      "id": "1089-134686-0003",
+      "errors": 0,
+      "wer": 0.0,
+      "reference": "hello bertie any good in your mind",
+      "hypothesis": "hello bertie any good in your mind"
+    }
+  ]
+}
