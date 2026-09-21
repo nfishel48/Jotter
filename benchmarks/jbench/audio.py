@@ -36,6 +36,39 @@ def decode_to_wav(source: Path, destination: Path) -> tuple[int, float]:
     return rate, len(mono) / rate if rate else 0.0
 
 
+def ensure_wav(source: Path, destination: Path) -> Path:
+    """The path `jotter-bench` should be given for `source`, decoding if needed.
+
+    The driver reads audio with `stage::wav::read_track`, which is hound: RIFF
+    only, and it collects `samples::<i16>()` without consulting the channel
+    count, so a non-mono or non-PCM16 file is not merely rejected but silently
+    misread. Every corpus here ships something else — FLAC (LibriSpeech),
+    SPHERE (TED-LIUM), MP3 (Common Voice) — so without this the first item dies
+    with "Ill-formed WAVE file: no RIFF tag found".
+
+    Decoding happens here rather than in the Rust driver on purpose: the shipped
+    crate only ever reads WAVs it wrote itself, and teaching it to decode
+    formats no real recording contains would be carrying a decoder for the
+    benchmark's sake. libsndfile already does it, which is why soundfile is a
+    dependency.
+
+    Returns `source` unchanged when it is already what the driver wants, so a
+    WAV corpus costs nothing.
+    """
+    info = sf.info(str(source))
+    if info.format == "WAV" and info.channels == 1 and info.subtype == "PCM_16":
+        return source
+
+    # A corpus is thousands of clips and `prepare` runs again on every `--limit`
+    # sweep and every `run` that finds no manifest. The decode is deterministic,
+    # so anything newer than its source is already right.
+    if destination.exists() and destination.stat().st_mtime >= source.stat().st_mtime:
+        return destination
+
+    decode_to_wav(source, destination)
+    return destination
+
+
 def to_int16(samples: np.ndarray) -> np.ndarray:
     """Float in [-1, 1] to int16, clipped.
 

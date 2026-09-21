@@ -136,6 +136,7 @@ def cmd_prepare(args) -> int:
         items = _take(items, args.limit)
 
     items_path, refs_path = _manifest_paths(args.corpus)
+    items = _decoded(items, args.corpus)
     count = manifest.write(items, items_path, refs_path)
     if count == 0:
         print(f"{args.corpus}: no items found under {root}", file=sys.stderr)
@@ -413,6 +414,26 @@ def cmd_aec(args) -> int:
     print(table)
     print(f"\nwritten: {paths.RESULTS / stem}.json/.md")
     return 0
+
+
+def _decoded(items, corpus: str):
+    """Point each item at audio `jotter-bench` can actually read.
+
+    Lazy, so the decode is interleaved with the walk rather than done as a
+    separate pass over thousands of files — `manifest.write` streams, and a
+    prepare that printed nothing for ten minutes would look hung.
+
+    The decoded clips live under `work/`, which is gitignored as regenerable;
+    they are, at the cost of re-decoding. `data/` is deliberately left holding
+    exactly what was downloaded and checksum-pinned.
+    """
+    from .audio import ensure_wav
+
+    cache = paths.WORK / corpus / "audio"
+    for item in items:
+        source = Path(item.audio)
+        item.audio = ensure_wav(source, cache / f"{item.id}.wav")
+        yield item
 
 
 def _manifest_paths(corpus: str) -> tuple[Path, Path]:
