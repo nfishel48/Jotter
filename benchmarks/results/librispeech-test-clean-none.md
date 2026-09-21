@@ -3,8 +3,6 @@
 **WER 1.39%**  (95% CI 0.00%–5.08%)
 5 utterances · 72 reference words
 
-> **Working tree was dirty.** The recorded commit does not describe the code that produced this number.
-
 ## Where the errors are
 
 | | count | share of errors |
@@ -22,7 +20,7 @@
 
 ## What produced this
 
-- jotter 0.1.13 (transcribe v1) at `0cba995bf8e9`
+- jotter 0.1.13 (transcribe v1) at `ad19125439f6`
 - model `parakeet-tdt-0.6b-v2-int8` via sherpa-onnx, 4 threads
 - segmentation **none**
 - normaliser whisper: transformers 4.53.2, english.json sha256:6607f948be98 (1739 entries)
