@@ -35,6 +35,7 @@ laptop in a real room.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -172,7 +173,7 @@ def _synthesise_one(
         far[:length] += signal[:length]
 
     response = room.load_response(rir, rate) if rir else room.impulse_response(
-        rate, rt60=rt60, delay_ms=delay_ms, seed=abs(hash(meeting)) % (2**32)
+        rate, rt60=rt60, delay_ms=delay_ms, seed=_room_seed(meeting)
     )
     bleed = room.scale_to_ratio(room.apply(far, response), near, bleed_db)
 
@@ -194,6 +195,20 @@ def _synthesise_one(
     }
     (directory / "reference.json").write_text(json.dumps(reference))
     return directory
+
+
+def _room_seed(meeting: str) -> int:
+    """A different room per meeting, but the *same* different room every run.
+
+    This was `abs(hash(meeting))`, and `hash()` of a str is randomised per
+    process — so every invocation built a different room, two runs of this
+    benchmark were never comparable, and an A/B across them measured the
+    furniture rather than the change under test. `room.py` is written around
+    the opposite guarantee ("the same seed gives the same room on every
+    machine"); `hashlib` is what actually delivers it.
+    """
+    digest = hashlib.sha256(meeting.encode()).digest()
+    return int.from_bytes(digest[:4], "big")
 
 
 def _audio_path(root: Path, meeting: str, channel: str) -> Path:

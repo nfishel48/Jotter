@@ -103,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sweep", help="comma-separated ERL values in dB")
     p.add_argument("--rir", type=Path)
     p.add_argument("--tag")
+    p.add_argument("--normalizer", choices=["whisper", "basic"], default="whisper")
+    p.add_argument("--no-transcribe", action="store_true",
+                   help="dB figures only, skipping the word error rates")
 
     p = sub.add_parser("smoke", help="run the whole harness on generated audio")
 
@@ -402,16 +405,22 @@ def cmd_aec(args) -> int:
     )
     conditions = aec.build(clips, paths.WORK / "aec", sweep=sweep, rir=args.rir)
 
+    # Loaded once and passed down: every condition scores against the same
+    # normaliser, and rebuilding it per item would be the slowest part of a
+    # run that is otherwise all transcription.
+    normalizer = None if args.no_transcribe else normalize.load(args.normalizer)
+
     rows = []
     for condition in conditions:
         print(f"  {condition.directory.name}")
-        rows.append(aec.measure(condition))
+        rows.append(aec.measure(condition, normalizer))
 
     table = aec.summarise(rows)
     summary = {
         "corpus": "aec-sweep",
         "sweep_db": list(sweep),
         "rows": rows,
+        "normalizer": None if normalizer is None else normalizer.provenance(),
         "run": report.provenance({"source_corpus": args.corpus, "items": len(conditions)}),
     }
     stem = "aec-sweep" + (f"-{args.tag}" if args.tag else "")
