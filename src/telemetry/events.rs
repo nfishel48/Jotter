@@ -17,6 +17,7 @@ pub const RECORDING_COMPLETED: &str = "recording_completed";
 pub const RECORDING_FAILED: &str = "recording_failed";
 pub const RECORDING_PROCESSED: &str = "recording_processed";
 pub const RECORDING_TRANSCRIBED: &str = "recording_transcribed";
+pub const RECORDING_DIARIZED: &str = "recording_diarized";
 
 pub const DEVICES_REFRESHED: &str = "devices_refreshed";
 pub const DEVICE_LIST_FAILED: &str = "device_list_failed";
@@ -261,6 +262,74 @@ pub fn transcript_props(report: &crate::audio::transcribe::TranscriptReport) -> 
     props
 }
 
+/// Everything worth reporting about a diarization pass.
+///
+/// Same contract as [`transcript_props`]: this function picks, call sites do not
+/// assemble.
+///
+/// **No speaker labels, and nothing that could become one.** Not the labels,
+/// not a per-speaker word count, not how long each person talked. `speakers` is
+/// a count — how many people were on the call — and the rest describe how well
+/// the pass ran. A property here that needed the transcript to compute is the
+/// signal it does not belong.
+///
+/// The figure worth having in aggregate is `attributed_pct`: the share of
+/// system segments that got a label at all. It is the one number that says
+/// whether this feature works on real meetings rather than on the one the
+/// developer tested, and — like the transcription pass's real-time factor — it
+/// cannot be measured anywhere but here.
+#[cfg(feature = "diarize")]
+pub fn diarize_props(report: &crate::audio::diarize::DiarizeReport) -> Vec<Prop> {
+    use crate::audio::stage::DeclineReason;
+
+    let mut props = vec![
+        // Both ids are catalogue data, never free-form — see `models::Model`.
+        ("segmentation_model", report.segmentation_model_id.into()),
+        ("embedding_model", report.embedding_model_id.into()),
+        ("engine", report.engine.into()),
+        ("labelled_transcript", report.output.is_some().into()),
+        (
+            "duration_bucket",
+            duration_bucket(report.audio_secs as f64).into(),
+        ),
+    ];
+
+    if let Some(decline) = &report.decline {
+        // From `kind()`, never `Display`: the human-facing message tells the
+        // user what to run.
+        props.push(("decline_reason", decline.kind().into()));
+        // A decline decided nothing about the audio, so the figures below would
+        // all be zero and would drag every average down with them.
+        return props;
+    }
+
+    props.push(("speakers", report.speakers.into()));
+    props.push(("system_segments", report.system_segments.into()));
+
+    // Fractions rather than raw seconds, for the reason `aec_props` gives: the
+    // shape of a meeting is the signal, an exact duration is closer to a
+    // fingerprint.
+    if report.system_segments > 0 {
+        props.push((
+            "attributed_pct",
+            ((report.attributed_segments as f32 / report.system_segments as f32 * 100.0).round()
+                as i64)
+                .into(),
+        ));
+    }
+    if report.audio_secs > 0.0 {
+        // Scaled by 100 for the reason the transcription pass's is: `Prop`
+        // carries integers, and a bare `0` would lose the difference between
+        // "twice as fast as realtime" and "fifty times".
+        props.push((
+            "realtime_factor_pct",
+            ((report.elapsed_secs / report.audio_secs * 100.0).round() as i64).into(),
+        ));
+    }
+
+    props
+}
+
 /// Property keys must be `&'static str`, and these are built from a fixed pair
 /// of labels, so the mapping is spelled out rather than formatted.
 fn prefixed(label: &str, suffix: &str) -> &'static str {
@@ -341,6 +410,9 @@ mod tests {
             RECORDING_STARTED,
             RECORDING_COMPLETED,
             RECORDING_FAILED,
+            RECORDING_PROCESSED,
+            RECORDING_TRANSCRIBED,
+            RECORDING_DIARIZED,
             DEVICES_REFRESHED,
             DEVICE_LIST_FAILED,
             SETTINGS_OPENED,
@@ -379,6 +451,7 @@ mod tests {
             system: Some(track("system", 0)),
             aec: None,
             transcript: None,
+            diarization: None,
         };
 
         let props = recording_props(&meta);
@@ -467,6 +540,7 @@ mod tests {
             system: Some(track("system", 0)),
             aec: None,
             transcript: None,
+            diarization: None,
         };
 
         let props = recording_props(&meta);
@@ -496,6 +570,7 @@ mod tests {
             system: None,
             aec: None,
             transcript: None,
+            diarization: None,
         };
 
         let props = recording_props(&meta);
@@ -635,5 +710,125 @@ mod tests {
         // 73.2s of work for 1062s of audio.
         assert_eq!(get("realtime_factor_pct"), Some(serde_json::json!(7)));
         assert_eq!(get("speech_pct"), Some(serde_json::json!(46)));
+    }
+
+    #[cfg(feature = "diarize")]
+    fn diarize_report(
+        decline: Option<crate::audio::diarize::DiarizeDecline>,
+    ) -> crate::audio::diarize::DiarizeReport {
+        crate::audio::diarize::DiarizeReport {
+            // From the catalogue rather than spelled out, so swapping a model
+            // cannot leave this fixture asserting against an id that no longer
+            // exists — which is exactly what happened once already.
+            segmentation_model_id: crate::models::DEFAULT_SEGMENTATION_MODEL.id,
+            embedding_model_id: crate::models::DEFAULT_EMBEDDING_MODEL.id,
+            engine: "sherpa-onnx",
+            speakers: 3,
+            system_segments: 126,
+            attributed_segments: 119,
+            audio_secs: 1_062.0,
+            elapsed_secs: 106.2,
+            output: decline
+                .is_none()
+                .then(|| "/Users/nfishel/Documents/Jotter/2026-09-16/transcript.json".into()),
+            decline,
+        }
+    }
+
+    /// The PII contract for diarization. The stakes here are subtly different
+    /// from transcription's: this stage does not hold the text, but it holds the
+    /// one thing the text does not make explicit — *who was in the meeting*.
+    /// A speaker label is a pseudonym today and the anchor for a real name one
+    /// step later, so none of them may leave the machine, and neither may
+    /// anything per-speaker that a label could be reconstructed from.
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn diarize_props_omit_the_path_and_every_speaker() {
+        let rendered = format!("{:?}", diarize_props(&diarize_report(None)));
+
+        for leaked in [
+            "nfishel",
+            "Documents",
+            "Jotter",
+            ".json",
+            "2026-09-16",
+            "speaker_",
+        ] {
+            assert!(
+                !rendered.contains(leaked),
+                "{leaked:?} leaked into diarize props: {rendered}"
+            );
+        }
+
+        // Every value sent is a number, a bool, or a string from the catalogue.
+        // A free-form string appearing here is the shape a leak would take.
+        for (key, value) in diarize_props(&diarize_report(None)) {
+            if let Some(text) = value.as_str() {
+                assert!(
+                    [
+                        crate::models::DEFAULT_SEGMENTATION_MODEL.id,
+                        crate::models::DEFAULT_EMBEDDING_MODEL.id,
+                        "sherpa-onnx",
+                    ]
+                    .contains(&text)
+                        || key == "duration_bucket",
+                    "unexpected free-form value {text:?} under {key:?}"
+                );
+            }
+        }
+    }
+
+    /// Same rule as transcription's: a decline measured nothing, so the reason
+    /// is the whole finding and the figures must be absent rather than zero.
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn a_diarization_decline_reports_its_reason_and_no_measurements() {
+        use crate::audio::diarize::DiarizeDecline;
+
+        let props = diarize_props(&diarize_report(Some(DiarizeDecline::ModelsMissing {
+            files: 2,
+        })));
+        let get = |key: &str| {
+            props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        };
+
+        assert_eq!(
+            get("decline_reason"),
+            Some(serde_json::json!("models_missing"))
+        );
+        assert_eq!(get("labelled_transcript"), Some(serde_json::json!(false)));
+        assert_eq!(get("speakers"), None);
+        assert_eq!(get("attributed_pct"), None);
+        assert_eq!(get("realtime_factor_pct"), None);
+
+        // The reason is the stable `kind()`, never the sentence — which tells
+        // the user which command to run.
+        let rendered = format!("{props:?}");
+        assert!(!rendered.contains("jotter models pull"), "{rendered}");
+    }
+
+    /// The figure the whole event exists for: how often the pass could place a
+    /// segment at all. Segments it could not are left unlabelled rather than
+    /// guessed at, so this is the honest measure of whether diarization works on
+    /// real meetings.
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn the_attributed_share_survives_as_an_integer() {
+        let props = diarize_props(&diarize_report(None));
+        let get = |key: &str| {
+            props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+        };
+
+        // 119 of 126 system segments placed.
+        assert_eq!(get("attributed_pct"), Some(serde_json::json!(94)));
+        // 106.2s of work for 1062s of audio.
+        assert_eq!(get("realtime_factor_pct"), Some(serde_json::json!(10)));
+        assert_eq!(get("speakers"), Some(serde_json::json!(3)));
     }
 }

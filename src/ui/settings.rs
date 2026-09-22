@@ -42,14 +42,15 @@ pub enum Status {
 
 /// Which post-recording pass is running.
 ///
-/// Echo cancellation is the only one so far; transcription, diarization and
-/// summarization are the ones this shape exists for. The wording lives here
-/// rather than at the call site so that a stage names itself once, in the module
-/// that owns the pane's text.
+/// Echo cancellation, transcription and diarization so far; summarization is
+/// the next one this shape exists for. The wording lives here rather than at the
+/// call site so that a stage names itself once, in the module that owns the
+/// pane's text.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Aec,
     Transcribe,
+    Diarize,
 }
 
 impl Stage {
@@ -58,6 +59,7 @@ impl Stage {
         match self {
             Stage::Aec => "Removing speaker echo…",
             Stage::Transcribe => "Transcribing…",
+            Stage::Diarize => "Identifying speakers…",
         }
     }
 
@@ -68,6 +70,7 @@ impl Stage {
         match self {
             Stage::Aec => "echo removal",
             Stage::Transcribe => "transcription",
+            Stage::Diarize => "speaker identification",
         }
     }
 
@@ -80,6 +83,7 @@ impl Stage {
         match self {
             Stage::Aec => crate::telemetry::events::RECORDING_PROCESSED,
             Stage::Transcribe => crate::telemetry::events::RECORDING_TRANSCRIBED,
+            Stage::Diarize => crate::telemetry::events::RECORDING_DIARIZED,
         }
     }
 }
@@ -105,6 +109,14 @@ pub enum Action {
     /// The user ticked or unticked the transcription checkbox. An `Action` for
     /// the same reason as [`Action::SetAec`].
     SetTranscribe(bool),
+    /// The user ticked or unticked the speaker-identification checkbox. An
+    /// `Action` for the same reason as [`Action::SetAec`].
+    SetDiarize(bool),
+    /// The user changed how many people to expect on a call. An `Action` for
+    /// the same reason as [`Action::SetAec`], and the only one carrying a
+    /// number: unlike every other setting here, this pass cannot run at all
+    /// until it has one.
+    SetDiarizeSpeakers(u8),
 }
 
 pub struct View<'a> {
@@ -120,6 +132,30 @@ pub struct View<'a> {
     pub telemetry: TelemetryView,
     pub aec: AecView,
     pub transcribe: TranscribeView,
+    pub diarize: DiarizeView,
+}
+
+/// Everything the speaker-identification toggle needs to render.
+#[derive(Clone, Copy)]
+pub struct DiarizeView {
+    /// The stored preference — what the checkbox shows.
+    pub enabled: bool,
+    /// Whether this build can diarize at all.
+    pub available: bool,
+    /// Whether both speaker models have been downloaded.
+    pub models_ready: bool,
+    /// People expected on a call, or `0` for not set — at which point the pass
+    /// declines. Carried into the view because the pane has to show the number
+    /// *and* explain that leaving it at zero stops the feature working.
+    pub speakers: u8,
+    /// Whether transcription is switched on.
+    ///
+    /// Not a third kind of unavailability, and deliberately not a reason to
+    /// disable the checkbox: this pass labels a transcript, so with
+    /// transcription off it has nothing to do — but that is one tick away in the
+    /// same pane, and greying out the box would leave someone hunting for the
+    /// reason. It is said in the detail line instead.
+    pub transcribe_enabled: bool,
 }
 
 /// Everything the transcription toggle needs to render.
@@ -224,8 +260,9 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
             });
 
             // In the order the passes actually run, so the pane reads as the
-            // pipeline it describes: echo removal cleans the mic track, then
-            // transcription reads whichever track that left behind.
+            // pipeline it describes: echo removal cleans the mic track,
+            // transcription reads whichever track that left behind, and speaker
+            // identification labels what transcription wrote.
             ui.add_space(8.0);
             if let Some(chosen) = processing(ui, view.aec) {
                 action = Some(chosen);
@@ -233,6 +270,11 @@ pub fn draw(ui: &mut egui::Ui, view: View<'_>) -> Option<Action> {
 
             ui.add_space(8.0);
             if let Some(chosen) = transcription(ui, view.transcribe) {
+                action = Some(chosen);
+            }
+
+            ui.add_space(8.0);
+            if let Some(chosen) = speakers(ui, view.diarize) {
                 action = Some(chosen);
             }
 
@@ -338,6 +380,88 @@ fn transcription(ui: &mut egui::Ui, view: TranscribeView) -> Option<Action> {
             "Needs a speech model, which is not downloaded yet. Run \
              `jotter models pull` in a terminal (about 630 MB, once). Until then \
              this is ticked but every recording will say the model is missing."
+        };
+        ui.label(egui::RichText::new(detail).small().weak());
+    });
+
+    action
+}
+
+/// The speaker-identification toggle, and the count it cannot run without.
+///
+/// Four things can stop this working and they need four different sentences,
+/// because only some are something the user can act on here. The box stays
+/// tickable in every case — the pass declines and records why, as every stage
+/// does — but the pane says so first.
+///
+/// The count sits next to the checkbox rather than behind an "advanced"
+/// disclosure, because it is not a refinement: at zero this feature does
+/// nothing at all. A control that is required to make the thing above it work
+/// belongs beside it.
+fn speakers(ui: &mut egui::Ui, view: DiarizeView) -> Option<Action> {
+    let mut action = None;
+
+    ui.add_enabled_ui(view.available, |ui| {
+        let mut enabled = view.enabled;
+        if ui
+            .checkbox(&mut enabled, "Identify who is speaking")
+            .changed()
+        {
+            action = Some(Action::SetDiarize(enabled));
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("People on the call:").small());
+            let mut count = view.speakers;
+            // Capped well above any meeting this is useful for. The ceiling is
+            // not a judgement about meeting sizes, it is to keep a dragged
+            // value from silently becoming 200.
+            if ui
+                .add(
+                    egui::DragValue::new(&mut count)
+                        .speed(0.1)
+                        .range(0..=32)
+                        .custom_formatter(|n, _| {
+                            if n < 1.0 {
+                                "not set".to_string()
+                            } else {
+                                format!("{n:.0}")
+                            }
+                        }),
+                )
+                .changed()
+            {
+                action = Some(Action::SetDiarizeSpeakers(count));
+            }
+            ui.label(egui::RichText::new("including you").small().weak());
+        });
+
+        let detail = if !view.available {
+            "This build was compiled without speaker identification."
+        } else if !view.models_ready {
+            "Needs two speaker models, which are not downloaded yet. Run \
+             `jotter models pull` in a terminal (about 44 MB on top of the \
+             speech model). Until then this is ticked but every recording will \
+             say the models are missing."
+        } else if !view.transcribe_enabled {
+            "Nothing to label until recordings are transcribed — tick \
+             Transcribe above, and this will run straight after it."
+        } else if view.speakers == 0 {
+            // Stated as a requirement, not as a preference, because that is
+            // what it is. Asking is the honest option: working the number out
+            // from the audio was tried and got it badly wrong on exactly the
+            // meetings people actually have.
+            "Set the number of people above. Counting them from the audio is \
+             unreliable once people talk over each other, so Jotter asks \
+             instead of guessing — and does nothing until you say."
+        } else {
+            // The asymmetry is the first thing anyone notices in the file, and
+            // it is a feature rather than a gap: your own track needs no
+            // guessing, so it gets none.
+            "Runs on your machine — nothing is uploaded. Everyone else's audio \
+             is split into speaker_01, speaker_02 and so on. Your own track is \
+             already known to be you, so it is left unlabelled rather than \
+             guessed at."
         };
         ui.label(egui::RichText::new(detail).small().weak());
     });

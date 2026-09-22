@@ -192,6 +192,54 @@ pub struct TranscriptInfo {
     pub declined: Option<String>,
 }
 
+/// What the diarization pass did.
+///
+/// Same contract as [`TranscriptInfo`]: every field is a number or a short fixed
+/// string, so the whole struct is safe to report as telemetry except `path`.
+///
+/// **No speaker labels here, and no count of words per speaker.** The labels
+/// live in `transcript.json` beside the text they belong to; duplicating them
+/// into the sidecar would put "who was in this meeting" into a file whose other
+/// fields are all safe to send somewhere. `speakers` is a count, which says how
+/// many people were on the call and nothing about who.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiarizationInfo {
+    /// Relative path of the transcript this pass labelled — `transcript.json`,
+    /// the same file the transcription pass wrote. Absent when the pass
+    /// declined.
+    ///
+    /// Not a new artifact: diarization fills in a field the format reserved for
+    /// it rather than writing a second file that readers would have to join
+    /// against. The path is still recorded, because [`crate::audio::stage::Stage`]
+    /// treats a record with no output as never current, which is exactly right
+    /// for a decline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Model and parameter generation, in the sense of [`AecInfo::version`].
+    pub version: u32,
+    /// Catalogue ids of the two models used. Both, because either one changing
+    /// is a reason to redo the pass, and the pair is what identifies the result.
+    pub segmentation_model: String,
+    pub embedding_model: String,
+    /// Distinct speakers found on the system track.
+    pub speakers: u32,
+    /// System segments the pass considered, and how many it could attribute.
+    /// The gap between them is the honest measure of how well this ran: a
+    /// segment with no overlapping speaker turn keeps no label rather than
+    /// being guessed at.
+    pub system_segments: u32,
+    pub attributed_segments: u32,
+    /// Seconds of system audio read.
+    pub audio_secs: f32,
+    /// Wall clock of the pass, for the real-time factor.
+    pub elapsed_secs: f32,
+    /// `Some(reason)` when the pass looked and declined, from
+    /// `DiarizeDecline::kind()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined: Option<String>,
+}
+
 /// The ERLE below which the cancelled track is not worth preferring.
 ///
 /// Well under the 14-18 dB ceiling the reference recording's coherence implies,
@@ -223,6 +271,12 @@ pub struct Meta {
     /// `skip_serializing_if` for the same load-bearing reason as `aec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<TranscriptInfo>,
+    /// Written by the diarization pass, which runs after transcription and
+    /// labels the file that pass wrote.
+    ///
+    /// `skip_serializing_if` for the same load-bearing reason as `aec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization: Option<DiarizationInfo>,
 }
 
 impl Meta {
@@ -319,6 +373,7 @@ mod tests {
             system: Some(track(system)),
             aec: None,
             transcript: None,
+            diarization: None,
         }
     }
 

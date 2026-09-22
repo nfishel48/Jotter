@@ -49,6 +49,24 @@ pub struct Settings {
     /// `meta.json`, which is a confusing way to introduce a feature nobody has
     /// asked for yet.
     pub transcribe_enabled: bool,
+    /// Whether to work out who said what, once a recording has a transcript.
+    ///
+    /// Off by default for the same reason `transcribe_enabled` is — it needs
+    /// models fetched deliberately — and doubly so because it can do nothing at
+    /// all unless transcription is on too. A pass with no transcript to label
+    /// declines; that is correct behaviour, but a stream of declines is a poor
+    /// introduction to a feature.
+    pub diarize_enabled: bool,
+    /// How many people to expect on the system track. `0` means not set, and a
+    /// diarization pass without a count declines.
+    ///
+    /// A required setting rather than a tuning knob, and the reason is
+    /// measured: letting the clustering infer the count returned 208 speakers
+    /// for a meeting of three once the audio had people talking over each
+    /// other. `audio::diarize::DiarizeOptions::speakers` carries the full
+    /// argument. A count is also the one thing a user reliably knows about
+    /// their own meeting, which is what makes asking for it reasonable.
+    pub diarize_speakers: u8,
 }
 
 impl Default for Settings {
@@ -71,6 +89,13 @@ impl Default for Settings {
             // See the field's own note: on would mean a decline recorded against
             // every recording until someone runs `jotter models pull`.
             transcribe_enabled: false,
+            // See the field's own note: it needs both the models and a
+            // transcript, and neither exists on a fresh install.
+            diarize_enabled: false,
+            // Not set. There is no sensible number to guess — a default of 2
+            // would silently merge a four-person call — so the pass declines
+            // and asks rather than inventing one.
+            diarize_speakers: 0,
         }
     }
 }
@@ -217,6 +242,8 @@ mod tests {
             // defaulted one.
             aec_enabled: false,
             transcribe_enabled: true,
+            diarize_enabled: true,
+            diarize_speakers: 4,
         };
 
         settings.save_to(&path).unwrap();
@@ -257,6 +284,21 @@ mod tests {
     #[test]
     fn transcription_defaults_to_off_because_it_needs_a_downloaded_model() {
         assert!(!Settings::default().transcribe_enabled);
+    }
+
+    /// Same argument again, one stage further along: diarization needs its own
+    /// two models *and* a transcript to label, so on a fresh install it has
+    /// strictly less to work with than transcription does.
+    ///
+    /// The speaker count defaults to unset — `0` — rather than to a guess.
+    /// Inferring it was measured and rejected; a guessed constant would be
+    /// worse still, because it would be wrong silently and identically for
+    /// every recording.
+    #[test]
+    fn diarization_defaults_to_off_with_no_speaker_count() {
+        let settings = Settings::default();
+        assert!(!settings.diarize_enabled);
+        assert_eq!(settings.diarize_speakers, 0);
     }
 
     #[test]

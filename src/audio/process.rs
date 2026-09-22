@@ -755,6 +755,7 @@ mod tests {
             system,
             aec: None,
             transcript: None,
+            diarization: None,
         }
     }
 

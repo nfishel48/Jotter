@@ -21,7 +21,7 @@ path = "src/bin/bench.rs"
 required-features = ["bench"]
 
 [features]
-default = ["gui", "cli", "telemetry", "aec", "transcribe"]
+default = ["gui", "cli", "telemetry", "aec", "transcribe", "diarize"]
 # The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
 # gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
 gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
@@ -43,6 +43,18 @@ aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 # does not exist — and, since the catalogue is the only thing that knows any
 # download URLs, no model can be fetched either.
 transcribe = ["dep:sherpa-onnx", "dep:ureq", "dep:sha2"]
+# Speaker diarization: working out which of several people on the system track
+# said each segment, and filling in the `speaker` field `transcript.json` has
+# reserved since v1.
+#
+# Implies `transcribe` rather than repeating its dependency list, because this
+# is not an independent stage in the way `aec` is: it labels a transcript, so a
+# build that cannot produce one has nothing for it to do. Enabling it adds no
+# new dependency at all — sherpa-onnx already exposes `OfflineSpeakerDiarization`
+# and the symbols are in the same prebuilt static archive the transcription
+# stage already links. The cost is two more models to download (~35 MB), which
+# is the reason it is still a flag rather than part of `transcribe`.
+diarize = ["transcribe"]
 # The `jotter-bench` binary: word error rate over a speech corpus, for
 # `benchmarks/`. Off by default and never shipped.
 #

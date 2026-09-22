@@ -384,6 +384,71 @@ impl App {
         true
     }
 
+    /// Spawns the diarization pass, returning whether it started.
+    ///
+    /// Declines cheaply and silently for the two things knowable without loading
+    /// a model: the user has not asked for this, or there is no transcript to
+    /// label. The second is not a failure — transcription may have declined, or
+    /// be switched off — and the stage would record `no_transcript` against a
+    /// recording nobody asked to diarize. Everything beyond that is the stage's
+    /// call, and it records the reason in `meta.json`.
+    #[cfg(feature = "diarize")]
+    fn start_diarizing(&mut self, dir: &std::path::Path, meta: &audio::meta::Meta) -> bool {
+        if !self.settings.diarize_enabled {
+            return false;
+        }
+        let has_transcript = meta.transcript.as_ref().is_some_and(|t| t.path.is_some());
+        if !has_transcript {
+            return false;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        let thread_dir = dir.clone();
+        let speakers =
+            (self.settings.diarize_speakers > 0).then_some(self.settings.diarize_speakers);
+        std::thread::spawn(move || {
+            // Progress covers the decode and resample and then stops: the model
+            // run is a single call with no callback in this binding. Sent
+            // anyway, because reading an hour of audio is itself slow enough to
+            // want narrating — see the note in `audio::diarize`.
+            let progress_tx = tx.clone();
+            let options = audio::diarize::DiarizeOptions {
+                speakers,
+                ..Default::default()
+            };
+            let event = match audio::diarize::run_with_progress(&thread_dir, options, &mut |f| {
+                let _ = progress_tx.send(StageEvent::Progress(f));
+            }) {
+                Ok(report) => {
+                    let props = events::diarize_props(&report);
+                    let meta = audio::meta::Meta::read(&thread_dir.join("meta.json"))
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    StageEvent::Done {
+                        dir: thread_dir,
+                        result: meta,
+                        props,
+                    }
+                }
+                Err(e) => StageEvent::Done {
+                    dir: thread_dir,
+                    result: Err(e.to_string()),
+                    props: vec![("failed", true.into())],
+                },
+            };
+            let _ = tx.send(event);
+        });
+
+        self.processing = Some((settings::Stage::Diarize, rx));
+        self.status = settings::Status::Processing {
+            stage: settings::Stage::Diarize,
+            dir,
+            progress: None,
+        };
+        true
+    }
+
     /// Picks up whatever the running pass has sent, if anything.
     ///
     /// Stage-agnostic on purpose: a pass that wants a progress bar gets one by
@@ -431,6 +496,21 @@ impl App {
                         // would start another one.
                         #[cfg(all(feature = "aec", feature = "transcribe"))]
                         if stage == settings::Stage::Aec && self.start_transcribing(&dir, &meta) {
+                            return;
+                        }
+                        // And the next link: diarization labels the segments
+                        // transcription just wrote, so it waits for the same
+                        // reason. Only after `Transcribe`, so a finished
+                        // diarization does not start another one.
+                        //
+                        // There is deliberately no second entry point in
+                        // `stop_recording`: this pass needs a transcript, and a
+                        // recording that has just stopped with transcription off
+                        // has none. A fallback there would be code that looks
+                        // live and never runs.
+                        #[cfg(all(feature = "transcribe", feature = "diarize"))]
+                        if stage == settings::Stage::Transcribe && self.start_diarizing(&dir, &meta)
+                        {
                             return;
                         }
                         settings::Status::Finished { dir, meta }
@@ -500,6 +580,45 @@ impl App {
             enabled: false,
             available: false,
             model_ready: false,
+        }
+    }
+
+    /// Persist a change to the speaker-identification preference. As simple as
+    /// [`Self::set_aec`], and for the same reason.
+    fn set_diarize(&mut self, on: bool) {
+        self.settings.diarize_enabled = on;
+        self.persist_settings();
+    }
+
+    /// Persist how many people to expect on a call. `0` means not set, at which
+    /// point the pass declines rather than guessing — see `config::Settings`.
+    fn set_diarize_speakers(&mut self, count: u8) {
+        self.settings.diarize_speakers = count;
+        self.persist_settings();
+    }
+
+    #[cfg(feature = "diarize")]
+    fn diarize_view(&self) -> settings::DiarizeView {
+        settings::DiarizeView {
+            enabled: self.settings.diarize_enabled,
+            available: true,
+            // Four `stat`s, for the reason `transcribe_view` gives: cheap, and a
+            // cache would go stale exactly when it matters.
+            models_ready: crate::models::DEFAULT_SEGMENTATION_MODEL.resolve().is_ok()
+                && crate::models::DEFAULT_EMBEDDING_MODEL.resolve().is_ok(),
+            transcribe_enabled: self.settings.transcribe_enabled,
+            speakers: self.settings.diarize_speakers,
+        }
+    }
+
+    #[cfg(not(feature = "diarize"))]
+    fn diarize_view(&self) -> settings::DiarizeView {
+        settings::DiarizeView {
+            enabled: false,
+            available: false,
+            models_ready: false,
+            transcribe_enabled: false,
+            speakers: 0,
         }
     }
 
@@ -722,6 +841,7 @@ impl eframe::App for App {
         let telemetry_view = self.telemetry_view();
         let aec_view = self.aec_view();
         let transcribe_view = self.transcribe_view();
+        let diarize_view = self.diarize_view();
         let action = settings::draw(
             ui,
             settings::View {
@@ -735,6 +855,7 @@ impl eframe::App for App {
                 telemetry: telemetry_view,
                 aec: aec_view,
                 transcribe: transcribe_view,
+                diarize: diarize_view,
             },
         );
 
@@ -759,6 +880,8 @@ impl eframe::App for App {
             Some(settings::Action::SetTelemetry(on)) => self.set_telemetry(on),
             Some(settings::Action::SetAec(on)) => self.set_aec(on),
             Some(settings::Action::SetTranscribe(on)) => self.set_transcribe(on),
+            Some(settings::Action::SetDiarize(on)) => self.set_diarize(on),
+            Some(settings::Action::SetDiarizeSpeakers(n)) => self.set_diarize_speakers(n),
             Some(settings::Action::DismissTelemetryNotice) => {
                 self.settings.telemetry_notice_seen = true;
                 self.persist_settings();

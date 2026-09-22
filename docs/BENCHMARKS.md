@@ -61,6 +61,20 @@ things are scored: word error rate per track, **speaker attribution** (for every
 the right track?), and what the echo canceller bought, by running the same
 meetings again with it skipped.
 
+**This does not measure diarization, and cannot be made to.** "Speaker
+attribution" here means mic-versus-system — which of the two tracks a segment
+landed on — not which of several people inside the system track said it. The
+distinction matters because the fixture is actively hostile to the second
+question: AMI is a co-located meeting recorded on headsets, so every headset
+picks up every participant, and mixing three of them produces audio where all
+three voices are present at once essentially throughout. Diarizing it returns
+somewhere between 85 and 208 speakers for a meeting of three, depending on the
+embedding model, and no clustering threshold rescues it. Real system audio is
+the opposite case — each remote participant arrives as a separately encoded
+stream with no acoustic path between them — so this fixture is pessimistic in a
+way that says nothing useful. Scoring diarization needs a synthesis where the
+system track is built from speakers who were never in the same room.
+
 Attribution excludes overlapped speech. When two people talk at once there is no
 single correct track, and counting it would measure AMI's overlap rate as much
 as Jotter.

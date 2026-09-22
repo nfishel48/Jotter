@@ -18,7 +18,7 @@ Jotter tries to be simple for less technical users to use and still get the adva
 Transcription needs a speech model, which is too large to ship inside the binary. Fetch it once:
 
 ```bash
-jotter models pull      # ~630 MB, verified by checksum
+jotter models pull      # ~675 MB, verified by checksum
 jotter models list      # what is known, and what is ready
 ```
 
@@ -44,6 +44,38 @@ segment already says whether it was you or the room:
 ```json
 { "start": 0.42, "end": 3.10, "track": "mic", "text": "morning all" }
 ```
+
+## Who said it
+
+`track` already separates you from everyone else, for free — that is the whole
+point of recording two files. Telling apart the several people inside the
+`system` track is a second pass:
+
+```bash
+jotter diarize recordings/2026-09-15_14-32-08 --speakers 4
+```
+
+That fills in a `speaker` on each system segment, in place, without
+re-transcribing:
+
+```json
+{ "start": 3.20, "end": 8.04, "track": "system",
+  "speaker": "speaker_01", "text": "morning, shall we start" }
+```
+
+Your own segments are deliberately left unlabelled: the microphone track is you,
+and there is nothing to work out.
+
+**You have to say how many people were on the call.** Jotter can ask the model to
+count them instead, and it is not reliable enough to ship: on a clean recording
+it is right, and on a thirty-six minute meeting of three people who talked over
+each other it reported two hundred and eight speakers. A transcript that
+confidently names two hundred and eight people is worse than one that names
+none, so the number comes from you. Set it once in the settings pane, or pass
+`--speakers` per run.
+
+Speaker identification is off by default and needs two more models (~44 MB),
+fetched by the same `jotter models pull`.
 
 ## How accurate is it?
 

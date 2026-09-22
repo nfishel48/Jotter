@@ -211,6 +211,7 @@ mod tests {
             system: None,
             aec: stage,
             transcript: None,
+            diarization: None,
         }
     }
 
