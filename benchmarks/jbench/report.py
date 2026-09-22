@@ -19,6 +19,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
 from . import score as scoring
 
 
@@ -52,19 +53,61 @@ def _git_sha() -> str:
 
 
 def _git_dirty() -> bool:
-    """A result measured from uncommitted code cannot be reproduced from a sha,
-    and the report should say so rather than imply otherwise."""
+    """Whether the *code* that produced this result is uncommitted.
+
+    A result measured from uncommitted code cannot be reproduced from a sha,
+    and the report should say so rather than imply otherwise.
+
+    The results directory is excluded, and that exclusion is the whole point.
+    This runs while the report it describes is being written into that
+    directory, so counting it made the flag true on essentially every run —
+    including the first run of any new corpus, where `results/` is necessarily
+    untracked, and every rerun after, where the previous file is modified.
+    `results/README.md` tells people to check this field before quoting a
+    figure, and a field that is always `true` is one they learn to skip.
+
+    `work/` and `data/` need no exclusion: they are gitignored, so they never
+    appear here in the first place.
+    """
     try:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parent,
+        ).stdout.strip()
         out = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
             check=True,
             cwd=Path(__file__).resolve().parent,
-        ).stdout.strip()
-        return bool(out)
+        ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+    try:
+        ignore = paths.RESULTS.resolve().relative_to(Path(root).resolve()).as_posix() + "/"
+    except ValueError:  # results live outside the repo; nothing to exclude
+        ignore = None
+
+    return any(not _under(line, ignore) for line in out.splitlines() if line.strip())
+
+
+def _under(status_line: str, prefix: str | None) -> bool:
+    """Is a `git status --porcelain` line about a path below `prefix`?
+
+    Porcelain is `XY <path>`, with renames as `old -> new` and paths holding
+    special characters quoted. The new name is the one that decides a rename,
+    since that is where the file is now.
+    """
+    if prefix is None:
+        return False
+    path = status_line[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"').startswith(prefix)
 
 
 def build(
