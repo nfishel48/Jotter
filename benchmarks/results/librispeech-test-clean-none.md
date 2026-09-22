@@ -20,7 +20,7 @@
 
 ## What produced this
 
-- jotter 0.1.13 (transcribe v1) at `ad19125439f6`
+- jotter 0.1.13 (transcribe v1) at `2f928403a663`
 - model `parakeet-tdt-0.6b-v2-int8` via sherpa-onnx, 4 threads
 - segmentation **none**
 - normaliser whisper: transformers 4.53.2, english.json sha256:6607f948be98 (1739 entries)
