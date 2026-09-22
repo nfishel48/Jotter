@@ -79,6 +79,7 @@ takes the other option.
 | `recording_failed` | Recording could not start or finish | `phase`, `error_kind`, `cpal_kind`, `permission_shaped` |
 | `recording_processed` | Echo cancellation ran, or declined to | `dry_run`, `applied`, `delay_source`, `delay_ms`, `delay_segments`, `drift_ppm`, `aec3_delay_ms`, `far_gap_secs`, `duration_bucket`, `erle_db`, `near_gain_db`, `double_talk_gain_db`, `bypass_reason`, `double_talk_pct`, `far_only_pct` |
 | `recording_transcribed` | Transcription ran, or declined to | `model`, `engine`, `produced_transcript`, `duration_bucket`, `decline_reason`, `segments`, `mic_segments`, `system_segments`, `words`, `speech_pct`, `realtime_factor_pct` |
+| `recording_diarized` | Speaker identification ran, or declined to | `segmentation_model`, `embedding_model`, `engine`, `labelled_transcript`, `duration_bucket`, `decline_reason`, `speakers`, `system_segments`, `attributed_pct`, `realtime_factor_pct` |
 | `devices_refreshed` | Device list read | `total`, `input_capable`, `loopback_capable`, `has_default_output` |
 | `device_list_failed` | Device list could not be read | `error_kind` |
 | `settings_opened` | Settings window shown | `trigger` |

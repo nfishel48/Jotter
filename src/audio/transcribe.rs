@@ -781,6 +781,20 @@ fn finish(
         elapsed_secs: report.elapsed_secs,
         declined: Transcribe.declined_kind(report.decline.as_ref()),
     });
+
+    // A new transcript is a new set of segments, so any speaker labels a
+    // diarization pass left behind referred to text that no longer exists —
+    // `Transcript::write` has already overwritten them. Clearing the block is
+    // what stops `meta.json` claiming otherwise, and what makes the next
+    // diarization run rather than decline as already current.
+    //
+    // Only when a transcript was actually written: a decline changed nothing,
+    // and dropping the record then would throw away a good pass because a later
+    // one found no speech.
+    if report.output.is_some() {
+        meta.diarization = None;
+    }
+
     meta.write(meta_path)?;
 
     Ok(report)
@@ -813,7 +827,106 @@ mod tests {
             system,
             aec: None,
             transcript: None,
+            diarization: None,
         }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("jotter-transcribe-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn report(output: Option<PathBuf>) -> TranscriptReport {
+        TranscriptReport {
+            model_id: "m",
+            engine: "e",
+            segments: 1,
+            mic_segments: 1,
+            system_segments: 0,
+            words: 2,
+            speech_secs: 1.0,
+            audio_secs: 2.0,
+            elapsed_secs: 0.0,
+            decline: None,
+            output,
+        }
+    }
+
+    /// Re-transcribing rewrites `transcript.json` from scratch, so any speaker
+    /// labels a diarization pass had written are gone — `Transcript::write` has
+    /// already overwritten them. If `meta.diarization` survived that, the file
+    /// would claim labels that no longer exist and the next diarization run
+    /// would decline as already current, leaving the transcript permanently
+    /// unattributed.
+    #[test]
+    fn a_new_transcript_clears_the_diarization_record() {
+        let dir = scratch("clears-diarization");
+        let meta_path = dir.join("meta.json");
+
+        let mut m = meta(Some(track(48_000)), None);
+        m.diarization = Some(crate::audio::meta::DiarizationInfo {
+            path: Some(OUTPUT_NAME.into()),
+            version: 1,
+            speakers: 3,
+            ..Default::default()
+        });
+
+        finish(
+            &dir,
+            &meta_path,
+            m,
+            report(Some(dir.join(OUTPUT_NAME))),
+            None,
+            TranscribeOptions::default(),
+            Instant::now(),
+        )
+        .expect("finish");
+
+        let written = Meta::read(&meta_path).expect("read");
+        assert!(
+            written.diarization.is_none(),
+            "stale speaker labels were left claimed in meta.json"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A decline changed nothing, so the labels it did not touch are still
+    /// good. Dropping the record here would throw away a finished pass because
+    /// a later one found no speech.
+    #[test]
+    fn a_declined_transcription_leaves_existing_labels_alone() {
+        let dir = scratch("keeps-diarization");
+        let meta_path = dir.join("meta.json");
+
+        let mut m = meta(Some(track(48_000)), None);
+        m.diarization = Some(crate::audio::meta::DiarizationInfo {
+            path: Some(OUTPUT_NAME.into()),
+            version: 1,
+            speakers: 3,
+            ..Default::default()
+        });
+
+        finish(
+            &dir,
+            &meta_path,
+            m,
+            report(None),
+            Some(TranscribeDecline::NoSpeech),
+            TranscribeOptions::default(),
+            Instant::now(),
+        )
+        .expect("finish");
+
+        let written = Meta::read(&meta_path).expect("read");
+        assert_eq!(written.diarization.expect("kept").speakers, 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A decline is reconsidered on every run, and `model_missing` is the one

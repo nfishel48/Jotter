@@ -37,6 +37,36 @@ pub enum Command {
     /// Turn a finished recording into a transcript
     #[cfg(feature = "transcribe")]
     Transcribe(TranscribeArgs),
+    /// Work out who said what, in a recording that already has a transcript
+    #[cfg(feature = "diarize")]
+    Diarize(DiarizeArgs),
+}
+
+/// `jotter diarize <dir>`.
+///
+/// Separate from `transcribe` rather than a flag on it, because the two have
+/// very different costs: re-running this to try a different speaker count is
+/// seconds of clustering, and re-running transcription is the whole recogniser
+/// over the whole meeting. Anyone tuning the first should not have to pay the
+/// second.
+#[cfg(feature = "diarize")]
+#[derive(Args)]
+pub struct DiarizeArgs {
+    /// Recording directory, containing meta.json and a transcript.json
+    dir: PathBuf,
+
+    /// Report what would happen and write nothing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Re-label even if the transcript already carries current speakers
+    #[arg(long)]
+    force: bool,
+
+    /// How many people were on the call. Required, unless set in the settings
+    /// pane — the pass declines without it
+    #[arg(long, value_name = "N")]
+    speakers: Option<u8>,
 }
 
 /// `jotter transcribe <dir>`.
@@ -205,6 +235,16 @@ pub struct RecordArgs {
     #[cfg(feature = "transcribe")]
     #[arg(long, overrides_with = "transcribe")]
     no_transcribe: bool,
+
+    /// Work out who said what once the transcript exists. Defaults to the
+    /// stored setting; `--no-diarize` forces it off.
+    #[cfg(feature = "diarize")]
+    #[arg(long, overrides_with = "no_diarize")]
+    diarize: bool,
+
+    #[cfg(feature = "diarize")]
+    #[arg(long, overrides_with = "diarize")]
+    no_diarize: bool,
 }
 
 /// Mirrors `audio::Sources` rather than deriving `ValueEnum` on it directly:
@@ -257,6 +297,8 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::Models(args) => models(args),
         #[cfg(feature = "transcribe")]
         Command::Transcribe(args) => transcribe(args, &telemetry),
+        #[cfg(feature = "diarize")]
+        Command::Diarize(args) => diarize(args, &telemetry),
         Command::Telemetry(_) => unreachable!("handled above"),
     };
 
@@ -337,6 +379,14 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         false
     } else {
         Settings::load().transcribe_enabled
+    };
+    #[cfg(feature = "diarize")]
+    let run_diarize = if args.diarize {
+        true
+    } else if args.no_diarize {
+        false
+    } else {
+        Settings::load().diarize_enabled
     };
 
     let config = RecordConfig {
@@ -434,7 +484,38 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
         }
     }
 
+    // After transcription, never before it: this pass labels the segments that
+    // pass wrote, and with no transcript on disk it can only decline. Swallowed
+    // on failure for the same reason as transcription — the recording is the
+    // result, and `jotter diarize <dir>` can redo this at any time.
+    #[cfg(feature = "diarize")]
+    if run_diarize {
+        println!();
+        let options = audio::diarize::DiarizeOptions {
+            speakers: speaker_count(Settings::load().diarize_speakers),
+            ..Default::default()
+        };
+        match audio::diarize::run(&dir, options) {
+            Ok(report) => {
+                report_diarization(&report, false);
+                telemetry.track(events::RECORDING_DIARIZED, &events::diarize_props(&report));
+            }
+            Err(e) => println!("  speaker identification failed: {e}"),
+        }
+    }
+
     Ok(())
+}
+
+/// The stored speaker count as the stage wants it.
+///
+/// `0` is the settings file's way of saying "not set" — a `u8` with a sentinel
+/// rather than an `Option`, because `Settings` is a flat serde struct and a
+/// missing key already means default. The stage takes an `Option`, where the
+/// absence is unambiguous, so the translation happens once, here.
+#[cfg(feature = "diarize")]
+fn speaker_count(stored: u8) -> Option<u8> {
+    (stored > 0).then_some(stored)
 }
 
 /// Mirror of `ui::App::report_recording_failure`.
@@ -631,6 +712,111 @@ fn report_transcript(report: &audio::transcribe::TranscriptReport, dry_run: bool
     }
 }
 
+/// `jotter diarize <dir>` — who said what.
+#[cfg(feature = "diarize")]
+fn diarize(args: DiarizeArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+    use audio::diarize::{DiarizeOptions, run_with_progress};
+    use std::io::{IsTerminal, Write};
+
+    // A meeting with nobody in it is a typo, not a request. Rejected here rather
+    // than left to the stage so the message can name the flag.
+    if args.speakers == Some(0) {
+        return Err("--speakers must be at least 1".into());
+    }
+
+    let options = DiarizeOptions {
+        dry_run: args.dry_run,
+        force: args.force,
+        // The flag wins; the stored setting is the fallback for someone who
+        // always meets the same people. Neither is a decline the stage reports,
+        // rather than an error here, because `--dry-run` should still be able to
+        // say what else is or is not ready.
+        speakers: args
+            .speakers
+            .or_else(|| speaker_count(Settings::load().diarize_speakers)),
+    };
+
+    println!("identifying speakers in {}", args.dir.display());
+
+    // Same rule as `transcribe`, with one difference worth knowing about: the
+    // bar stops a fifth of the way across and stays there. Everything after the
+    // resample is a single call into ONNX that cannot report progress — see the
+    // note in `audio::diarize`.
+    let interactive = std::io::stdout().is_terminal();
+    let mut last = u8::MAX;
+    let report = run_with_progress(&args.dir, options, &mut |fraction| {
+        if !interactive {
+            return;
+        }
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
+        if percent != last {
+            last = percent;
+            print!("\r  reading audio… {percent}%");
+            let _ = std::io::stdout().flush();
+        }
+    })?;
+    if interactive && last != u8::MAX {
+        print!("\r{:30}\r", "");
+    }
+
+    report_diarization(&report, args.dry_run);
+    telemetry.track(events::RECORDING_DIARIZED, &events::diarize_props(&report));
+    Ok(())
+}
+
+/// Prints what the pass decided, in the shape of [`report_transcript`].
+#[cfg(feature = "diarize")]
+fn report_diarization(report: &audio::diarize::DiarizeReport, dry_run: bool) {
+    println!(
+        "  models     {} + {} ({})",
+        report.segmentation_model_id, report.embedding_model_id, report.engine
+    );
+    println!("  audio      {:.1}s of system track", report.audio_secs);
+
+    if let Some(decline) = &report.decline {
+        println!("  SKIPPED    {decline}");
+        return;
+    }
+
+    if dry_run {
+        println!("  would      identify speakers (dry run — no model was run)");
+        return;
+    }
+
+    println!("  speakers   {}", report.speakers);
+
+    // Both figures, always. A pass that found three speakers but could only
+    // place half the segments is a specific, recognisable failure — the turns
+    // and the transcript's segments disagree about where the pauses are — and a
+    // bare speaker count would hide it.
+    let missed = report
+        .system_segments
+        .saturating_sub(report.attributed_segments);
+    println!(
+        "  labelled   {} of {} segment(s){}",
+        report.attributed_segments,
+        report.system_segments,
+        if missed > 0 {
+            format!(" — {missed} left unattributed")
+        } else {
+            String::new()
+        }
+    );
+
+    let rtf = report.elapsed_secs / report.audio_secs.max(f32::MIN_POSITIVE);
+    println!(
+        "  took       {:.1}s ({rtf:.2}x realtime)",
+        report.elapsed_secs
+    );
+
+    match &report.output {
+        // "updated", not "wrote": this pass fills in a file the transcription
+        // pass created, and saying otherwise would suggest a second artifact.
+        Some(path) => println!("  updated    {}", path.display()),
+        None => println!("  updated    nothing"),
+    }
+}
+
 /// `jotter models list | path | pull`.
 ///
 /// Takes no `Telemetry`: which models someone has on disk is a statement about
@@ -665,15 +851,25 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ModelsCommand::Pull(args) => {
-            // No id means "everything transcription needs", which is the
-            // recogniser *and* the voice-activity model — they are separate
-            // catalogue entries, and a recogniser alone cannot run the stage.
+            // No id means "everything the offline passes need": the recogniser,
+            // the voice-activity model, and the two diarization models. They are
+            // separate catalogue entries — a recogniser alone cannot run the
+            // transcription stage — and the diarization pair is included rather
+            // than left opt-in because it is 35 MB against the recogniser's 630.
+            // Making someone come back for a second deliberate download would
+            // cost them more attention than the bytes cost their disk, and would
+            // leave the settings toggle dead for everyone who pulled already.
             let wanted: Vec<&'static models::Model> =
                 match args.model.as_deref() {
                     Some(id) => vec![models::find(id).ok_or_else(|| {
                         format!("unknown model {id:?} — see `jotter models list`")
                     })?],
-                    None => vec![models::DEFAULT_TRANSCRIPTION_MODEL, &models::SILERO_VAD],
+                    None => vec![
+                        models::DEFAULT_TRANSCRIPTION_MODEL,
+                        &models::SILERO_VAD,
+                        models::DEFAULT_SEGMENTATION_MODEL,
+                        models::DEFAULT_EMBEDDING_MODEL,
+                    ],
                 };
 
             let total: u64 = wanted.iter().map(|m| m.bytes()).sum();

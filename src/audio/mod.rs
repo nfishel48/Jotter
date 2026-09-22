@@ -10,6 +10,8 @@
 pub mod aec;
 pub mod capture;
 pub mod devices;
+#[cfg(feature = "diarize")]
+pub mod diarize;
 pub mod meta;
 #[cfg(feature = "aec")]
 pub mod process;
@@ -149,6 +151,7 @@ impl RecordingHandle {
             // from the egui thread.
             aec: None,
             transcript: None,
+            diarization: None,
         };
         meta.write(&out_dir.join("meta.json"))?;
         Ok(meta)

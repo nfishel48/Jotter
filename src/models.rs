@@ -42,6 +42,14 @@ pub enum Role {
     /// The voice-activity model, which is a model in its own right rather than
     /// part of the recogniser.
     Vad,
+    /// Speaker segmentation: which regions of a recording contain speech, and
+    /// where one voice gives way to another. Says *that* the speaker changed,
+    /// never who it changed to.
+    Segmentation,
+    /// The speaker embedding model, which turns a stretch of one voice into a
+    /// vector that can be compared with another. This is the half that decides
+    /// two segments are the same person.
+    SpeakerEmbedding,
 }
 
 /// Which runtime shape a model has, and therefore how a stage must configure it.
@@ -52,6 +60,11 @@ pub enum Family {
     NemoTransducer,
     /// Voice activity detection, not recognition.
     Vad,
+    /// A pyannote segmentation model, configured as the segmentation half of a
+    /// sherpa-onnx offline speaker diarizer.
+    SpeakerSegmentation,
+    /// A speaker embedding extractor, the other half of that pair.
+    SpeakerEmbedding,
 }
 
 /// One file belonging to a model.
@@ -147,11 +160,70 @@ pub const SILERO_VAD: Model = Model {
     }],
 };
 
+/// Pyannote segmentation 3.0, exported to ONNX for sherpa-onnx.
+///
+/// Diarization needs two models rather than one, and they are separate
+/// catalogue entries for the reason [`SILERO_VAD`] is: they are independently
+/// replaceable. This one finds the speaker *changes* — a better segmenter can
+/// be swapped in without touching the embeddings, and vice versa.
+pub const PYANNOTE_SEGMENTATION_3_0: Model = Model {
+    id: "pyannote-segmentation-3-0",
+    engine: "sherpa-onnx",
+    family: Family::SpeakerSegmentation,
+    description: "Pyannote 3.0 speaker segmentation",
+    assets: &[Asset {
+        role: Role::Segmentation,
+        name: "model.onnx",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+        sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+        bytes: 5_992_913,
+    }],
+};
+
+/// NVIDIA TitaNet small, as repackaged for sherpa-onnx.
+///
+/// Chosen by measurement, and it is worth recording what the measurement was,
+/// because the obvious candidate loses it. On a control of three distinct
+/// LibriSpeech speakers read back to back — clean studio audio, no overlap, no
+/// crosstalk, the easiest separation there is — this model puts each block in
+/// its own cluster. WeSpeaker CAM++ (the model the original prototype used),
+/// WeSpeaker ResNet34-LM and 3D-Speaker CAM++ all merged two of the three.
+///
+/// English, matching the default recogniser. 38 MB, against CAM++'s 28: the
+/// extra 10 MB is the difference between a feature that works and one that
+/// quietly attributes two people to one name, which is the expensive kind of
+/// wrong here — a reader cannot tell it happened.
+pub const NEMO_EN_TITANET_SMALL: Model = Model {
+    id: "nemo-en-titanet-small",
+    engine: "sherpa-onnx",
+    family: Family::SpeakerEmbedding,
+    description: "NVIDIA TitaNet small speaker embeddings (English)",
+    assets: &[Asset {
+        role: Role::SpeakerEmbedding,
+        name: "nemo_en_titanet_small.onnx",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+        sha256: "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+        bytes: 40_257_283,
+    }],
+};
+
 /// Every model this build knows how to fetch and run.
-pub const CATALOGUE: &[&Model] = &[&PARAKEET_TDT_0_6B_V2_INT8, &SILERO_VAD];
+pub const CATALOGUE: &[&Model] = &[
+    &PARAKEET_TDT_0_6B_V2_INT8,
+    &SILERO_VAD,
+    &PYANNOTE_SEGMENTATION_3_0,
+    &NEMO_EN_TITANET_SMALL,
+];
 
 /// What the transcription stage uses unless told otherwise.
 pub const DEFAULT_TRANSCRIPTION_MODEL: &Model = &PARAKEET_TDT_0_6B_V2_INT8;
+
+/// The segmentation half of what the diarization stage uses unless told
+/// otherwise.
+pub const DEFAULT_SEGMENTATION_MODEL: &Model = &PYANNOTE_SEGMENTATION_3_0;
+
+/// The embedding half of the same pair.
+pub const DEFAULT_EMBEDDING_MODEL: &Model = &NEMO_EN_TITANET_SMALL;
 
 /// Look a model up by [`Model::id`].
 pub fn find(id: &str) -> Option<&'static Model> {
@@ -490,6 +562,35 @@ mod tests {
             );
         }
         assert_eq!(SILERO_VAD.family, Family::Vad);
+    }
+
+    /// Diarization needs two models and will not start with one. They are
+    /// separate catalogue entries, so nothing but a test stops one of them
+    /// being edited into the wrong family — at which point the stage resolves a
+    /// file it cannot use and the failure surfaces from inside ONNX.
+    #[test]
+    fn the_diarization_pair_covers_both_of_its_roles() {
+        assert_eq!(
+            DEFAULT_SEGMENTATION_MODEL.family,
+            Family::SpeakerSegmentation
+        );
+        assert!(
+            DEFAULT_SEGMENTATION_MODEL
+                .assets
+                .iter()
+                .any(|a| a.role == Role::Segmentation)
+        );
+
+        assert_eq!(DEFAULT_EMBEDDING_MODEL.family, Family::SpeakerEmbedding);
+        assert!(
+            DEFAULT_EMBEDDING_MODEL
+                .assets
+                .iter()
+                .any(|a| a.role == Role::SpeakerEmbedding)
+        );
+
+        // Two entries, not one with two assets — see their doc comments.
+        assert_ne!(DEFAULT_SEGMENTATION_MODEL.id, DEFAULT_EMBEDDING_MODEL.id);
     }
 
     /// Absolute for the same reason `config::path` is: a macOS bundle's working

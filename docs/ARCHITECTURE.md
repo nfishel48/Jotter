@@ -404,6 +404,55 @@ flowchart TB
 
 ---
 
+## Workflow 8 — Who said it
+
+The third offline stage, after transcription, and the narrowest: the two-track
+recording has already answered "was this me", so all that is left is telling
+apart the several people inside `system.wav`. It writes no new artifact — it
+fills in the `speaker` field `transcript.json` reserved in v1.
+
+```mermaid
+flowchart TB
+    S[transcription done] --> G{diarize_enabled<br/>and a transcript<br/>exists?}
+    G -- no --> F[Status::Finished]
+    G -- yes --> N{speaker count<br/>set?}
+    N -- no --> D["record diarization.declined<br/>= no_speaker_count"]
+    N -- yes --> M{both models<br/>on disk?}
+    M -- no --> D2["record diarization.declined<br/>= models_missing"]
+    M -- yes --> R["system.wav → f32 at the<br/>segmentation model's rate"]
+    R --> P["pyannote segmentation +<br/>speaker embeddings + clustering<br/>(whole waveform, one call)"]
+    P --> SH["turns += track_offset_secs()"]
+    SH --> RN[renumber by first appearance]
+    RN --> L["each system segment takes the<br/>speaker it overlaps most in total"]
+    L --> W[rewrite transcript.json<br/>through a temp sibling]
+    W --> MT[rewrite meta.json<br/>with counts and RTF]
+    D --> MT
+    D2 --> MT
+    MT --> F
+
+    style P fill:#e8f4ff
+    style D fill:#ffe8e8
+    style D2 fill:#ffe8e8
+    style W fill:#e8ffe8
+```
+
+### Why each step is the way it is
+
+| Step | Reason |
+| --- | --- |
+| The system track only | `mic.wav` is you, decided by which device the audio came from rather than by a model. Running a speaker model over it could only split you in two. |
+| A stated speaker count, never inferred | sherpa-onnx will infer it, and measured, the inference is not safe to ship: on a 36-minute meeting of three people talking over each other it returned **208 speakers**, and no clustering threshold fixes that — sweeping it goes from "fragmented" to "everyone is one person" without passing through the truth. A stated count bounds the damage to putting the right number of people in the wrong groups, which is recoverable and visible. |
+| TitaNet rather than the obvious CAM++ | Chosen by measurement on a control of three LibriSpeech speakers read back to back — the easiest separation there is. WeSpeaker CAM++, WeSpeaker ResNet34-LM and 3D-Speaker CAM++ each merged two of the three; NVIDIA TitaNet small separated all three. |
+| After transcription | It labels the segments that pass wrote. There is deliberately no second entry point for a recording with no transcript — that would be code that looks live and never runs. |
+| Turns shifted onto the mic timeline | Same reason transcription shifts its segments: the clustering read `system.wav`, whose clock is not the transcript's. Skip it and every label lands on the neighbouring segment. |
+| Overlap **totalled per speaker** | A transcript segment can span several turns, because the VAD cut at pauses in the audio and the segmenter cut at changes of voice, and neither consulted the other. Taking the single longest turn instead hands the segment to whoever happened to have one uninterrupted stretch inside it. |
+| Renumbered by first appearance | Cluster indices are sparse — a three-speaker recording comes back as clusters 0, 3 and 6. Written through unchanged that is a `speaker_07` in a meeting of three, which reads as a bug in the attribution rather than as the meaningless number it is. |
+| Unmatched segments keep no label | The field is omitted while unset precisely so an unattributed segment can say so. A nearest-turn guess would be unfalsifiable. |
+| The whole waveform is resident | `OfflineSpeakerDiarizationProcess` takes one slice and offers no streaming form. An hour at 16 kHz is ~230 MB of `f32`; the `i16` track is dropped first so the two peaks do not add. Not a choice this stage gets to make. |
+| No progress during the model run | The C API has a callback form; the Rust binding at 1.13 does not expose it. Progress covers the decode and resample and then stops, which is honest about what is measurable. |
+
+---
+
 ## Recording state machine
 
 ```mermaid
@@ -472,8 +521,11 @@ pull`.
 
 `track` is the cheap half of speaker attribution and costs nothing: the
 operating system already separated the two signals. Segments also carry an
-optional `speaker`, omitted while unset, which a diarization pass will fill in
-for the `system` track without changing the shape of the file.
+optional `speaker`, omitted while unset, which the diarization pass
+(`audio/diarize.rs`) fills in for the `system` track without changing the shape
+of the file. Mic segments are never labelled — that track is you by
+construction, and a label there could only disagree with something already
+known.
 
 Times are on the **mic track's** timeline. System segments have already been
 shifted onto it by `meta.track_offset_secs()`, so a reader never has to know the
@@ -548,6 +600,7 @@ explicitly rather than trusting the happy path.
 | `audio/process.rs` | The echo-cancellation stage: activity classification, bypass decisions, `meta.json` rewrite (feature `aec`) |
 | `audio/transcript.rs` | The `transcript.json` format: `Transcript`, `Segment`, `Track`, and the merge onto one timeline. Not feature-gated — reading a transcript must not require the inference stack |
 | `audio/transcribe.rs` | The transcription stage: VAD segmentation, the `Transcriber` seam, decline decisions, `meta.json` rewrite (feature `transcribe`) |
+| `audio/diarize.rs` | The diarization stage: pyannote segmentation plus speaker embeddings over the system track, the `Diarizer` seam, and the overlap rule that turns speaker turns into labels on existing segments (feature `diarize`) |
 | `models.rs` | The speech-model catalogue, where models live on disk, and `resolve` (feature `transcribe`) |
 | `models/fetch.rs` | The verified downloader behind `jotter models pull`. The only code here that opens a socket for a reason other than telemetry |
 | `main.rs` | clap parsing and the GUI/CLI dispatch |
