@@ -14,4 +14,4 @@ scipy==1.15.3
 # model downloads. This is what makes a WER here comparable to a published
 # one; see jbench/normalize.py. Without it the harness still runs and says
 # loudly that its numbers are not comparable.
-transformers==4.53.2
+transformers==5.10.1
