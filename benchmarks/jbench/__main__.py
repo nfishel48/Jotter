@@ -389,7 +389,10 @@ def cmd_aec(args) -> int:
                 continue
             row = json.loads(line)
             reference = references.get(row["id"])
-            if reference:
+            # Skipped here rather than in `aec.build`, so a corpus of mostly
+            # long utterances yields the requested number of items instead of
+            # silently fewer. A header read per clip, and only until enough.
+            if reference and aec.fits_regime(Path(row["audio"])):
                 clips.append((row["id"], Path(row["audio"]), reference["reference"]))
             if len(clips) >= args.items * 4:
                 break

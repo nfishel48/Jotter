@@ -174,6 +174,42 @@ class TestAecSynthesis(unittest.TestCase):
         self.assertIn("text 0", condition.reference)
         self.assertIn("text 1", condition.reference)
         self.assertNotIn("text 2", condition.reference)
+        self.assertNotIn("text 3", condition.reference)
+
+    def _clip(self, name: str, secs: float):
+        from jbench.audio import write_mono
+
+        path = self.tmp / f"{name}.wav"
+        rng = np.random.default_rng(1)
+        write_mono(path, (rng.standard_normal(int(16_000 * secs)) * 0.1).astype(np.float32), 16_000)
+        return (name, path, f"words of {name}")
+
+    def test_clips_longer_than_a_regime_are_dropped(self):
+        # `_fit` truncates audio at REGIME_SECS but the whole clip's transcript
+        # becomes the reference, so an over-long clip puts words in the answer
+        # key that were never played — a floor of deletions no canceller can
+        # avoid, and an absolute WER that is fiction.
+        long_clip = self._clip("toolong", aec.REGIME_SECS + 2.5)
+        conditions = aec.build(
+            [long_clip] + self.clips, self.tmp / "out", sweep=(6.0,)
+        )
+        self.assertEqual(len(conditions), 1)
+        self.assertNotIn("toolong", conditions[0].reference)
+
+    def test_clips_shorter_than_a_regime_are_kept(self):
+        # Padding a short clip with silence is free: silence in the audio is
+        # silence in the reference. Only truncation loses words.
+        short = [self._clip(f"s{i}", 1.5) for i in range(4)]
+        condition = aec.build(short, self.tmp / "out", sweep=(6.0,))[0]
+        self.assertIn("words of s0", condition.reference)
+
+    def test_too_few_usable_clips_is_an_error_not_an_empty_sweep(self):
+        # Silently returning nothing would look like a corpus problem rather
+        # than a test-set one.
+        long_clips = [self._clip(f"L{i}", aec.REGIME_SECS + 1.0) for i in range(4)]
+        with self.assertRaises(ValueError) as caught:
+            aec.build(long_clips, self.tmp / "out", sweep=(6.0,))
+        self.assertIn("or shorter", str(caught.exception))
 
 
 class TestAttribution(unittest.TestCase):
