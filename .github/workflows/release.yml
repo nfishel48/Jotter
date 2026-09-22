@@ -218,7 +218,6 @@ jobs:
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
             libasound2-dev \
-            libgtk-3-dev libayatana-appindicator3-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 
@@ -357,8 +356,13 @@ jobs:
 
           Needs a running **PipeWire** session — system-audio capture uses
           PipeWire monitor capture and cannot work on the ALSA fallback. Runtime
-          libraries: `libpipewire-0.3`, `libasound2`, `gtk3`,
-          `libayatana-appindicator3`.
+          libraries: `libpipewire-0.3`, `libasound2`.
+
+          The tray icon needs a desktop that hosts **StatusNotifierItem** on the
+          session bus — KDE and most Wayland shells do natively; GNOME needs the
+          AppIndicator extension. No gtk3 or libayatana-appindicator is required
+          any more. Without an SNI host the tray does not appear, and the app is
+          still usable from the CLI.
 
           > Linux is **compile-verified only**. Capture has not been confirmed
           > against a live PipeWire session.

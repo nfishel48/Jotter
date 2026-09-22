@@ -27,12 +27,19 @@ fi
 
 echo "==> cargo $CMD for x86_64-unknown-linux-gnu (pipewire feature enabled)"
 
-# Deps for: pipewire host, alsa fallback, eframe/wgpu (x11+wayland+xkb), and
-# tray-icon (gtk3 + libappindicator).
+# Deps for: pipewire host, alsa fallback, and eframe/wgpu (x11+wayland+xkb).
 #
 # The x11 packages are needed even for a Wayland desktop: winit compiles both
-# backends and chooses at runtime, and gtk3 links X11 regardless. No libxdo-dev
-# — tray-icon's default `libxdo` feature is turned off in Cargo.toml.
+# backends and chooses at runtime. No libxdo-dev — tray-icon's default `libxdo`
+# feature is turned off in Cargo.toml — and nothing for the tray itself, which
+# speaks StatusNotifierItem through `ksni` and links no system library at all.
+#
+# Known gap: the `aec` feature cannot be checked here. Its
+# webrtc-audio-processing-sys build calls `meson setup --reconfigure`, which
+# bookworm's meson rejects on a fresh tree, so the default feature set stops
+# before it reaches jotter. ubuntu-latest in ci.yml has a meson that copes.
+# Until that is sorted, use `--no-default-features --features gui,cli` here for
+# a Linux answer, and let CI cover the echo pass.
 docker run --rm -t \
   -v "$ROOT":/src \
   -w /src \
@@ -46,7 +53,6 @@ docker run --rm -t \
       cmake \
       libpipewire-0.3-dev libspa-0.2-dev \
       libasound2-dev \
-      libgtk-3-dev libayatana-appindicator3-dev \
       libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
       libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
       >/dev/null 2>&1

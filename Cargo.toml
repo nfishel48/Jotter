@@ -94,8 +94,19 @@ image = { version = "0.25.10", optional = true }
 # on Linux. muda uses it only to synthesise X11 key events for predefined menu
 # items (Copy/Paste/…); our menu is custom items only. It is also useless on a
 # Wayland session, which cannot be driven by XTEST.
-tray-icon = { version = "0.24.2", optional = true, default-features = false, features = [
-  "gtk",
+#
+# `ksni` rather than `libappindicator` for the Linux backend, which is what the
+# `gtk` feature became in 0.25. Both speak StatusNotifierItem — libappindicator
+# is an SNI implementation wrapped in GTK — so this drops the wrapper rather
+# than changing the protocol the desktop sees. What it removes is the entire
+# gtk3 stack: gtk, gdk, atk, pango, cairo, gdk-pixbuf, gio and glib, none of
+# which this app calls directly and all of which existed to draw one tray icon.
+#
+# That also settles RUSTSEC's `glib::VariantStrIter` unsoundness, which arrived
+# transitively through gtk 0.18 and had no patch path — glib ≥ 0.20 needs
+# gtk ≥ 0.20, and libappindicator is pinned to the 0.18 line.
+tray-icon = { version = "0.25.1", optional = true, default-features = false, features = [
+  "ksni",
 ] }
 
 # Default features are what we want: `async-client` (+ tokio) and

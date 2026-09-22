@@ -59,7 +59,11 @@ jobs:
         run: brew install pkg-config meson ninja
 
       # Needed to *compile* on Linux, not to run: the pipewire/alsa -sys crates
-      # need real headers, and eframe + tray-icon pull in gtk/x11/wayland.
+      # need real headers, and eframe pulls in x11/wayland.
+      #
+      # No gtk or appindicator headers: the tray speaks StatusNotifierItem over
+      # D-Bus through `ksni`, which is pure Rust — so neither the gtk3 stack nor
+      # libdbus is needed to build it. See the note on `tray-icon` in Cargo.toml.
       #
       # cmake is for aws-lc-sys, which builds a C crypto library and arrives via
       # posthog-rs -> reqwest -> rustls. GitHub's image happens to ship it, but
@@ -73,7 +77,6 @@ jobs:
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
             libasound2-dev \
-            libgtk-3-dev libayatana-appindicator3-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 
