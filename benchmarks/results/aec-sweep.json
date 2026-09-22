@@ -18,7 +18,11 @@
       "far_only_secs": 0.1,
       "double_talk_secs": 7.9999948,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.5,
+      "wer_after": 0.3333333333333333,
+      "wer_delta": -0.16666666666666669,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0000+1089-134686-0002",
@@ -30,7 +34,11 @@
       "far_only_secs": 0.6,
       "double_talk_secs": 7.499995,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.5,
+      "wer_after": 0.3333333333333333,
+      "wer_delta": -0.16666666666666669,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0000+1089-134686-0002",
@@ -42,7 +50,11 @@
       "far_only_secs": 2.8999994,
       "double_talk_secs": 5.1999974,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.75,
+      "wer_after": 0.3333333333333333,
+      "wer_delta": -0.4166666666666667,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0000+1089-134686-0002",
@@ -54,7 +66,11 @@
       "far_only_secs": 4.599998,
       "double_talk_secs": 3.4999988,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.1111111111111111,
+      "wer_after": 0.3055555555555556,
+      "wer_delta": 0.19444444444444448,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0000+1089-134686-0002",
@@ -66,7 +82,11 @@
       "far_only_secs": 6.2999964,
       "double_talk_secs": 1.8000003,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.1111111111111111,
+      "wer_after": 0.16666666666666666,
+      "wer_delta": 0.05555555555555555,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0004+1089-134686-0006",
@@ -78,7 +98,11 @@
       "far_only_secs": 0.4,
       "double_talk_secs": 10.500004,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.47058823529411764,
+      "wer_after": 0.23529411764705882,
+      "wer_delta": -0.23529411764705882,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0004+1089-134686-0006",
@@ -90,7 +114,11 @@
       "far_only_secs": 1.8000003,
       "double_talk_secs": 9.099998,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.6764705882352942,
+      "wer_after": 0.14705882352941177,
+      "wer_delta": -0.5294117647058824,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0004+1089-134686-0006",
@@ -102,7 +130,11 @@
       "far_only_secs": 4.1999984,
       "double_talk_secs": 6.699996,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.6764705882352942,
+      "wer_after": 0.11764705882352941,
+      "wer_delta": -0.5588235294117647,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0004+1089-134686-0006",
@@ -114,7 +146,11 @@
       "far_only_secs": 6.799996,
       "double_talk_secs": 4.0999985,
       "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.6764705882352942,
+      "wer_after": 0.14705882352941177,
+      "wer_delta": -0.5294117647058824,
+      "transcript_changed": true
     },
     {
       "id": "1089-134686-0004+1089-134686-0006",
@@ -126,133 +162,22 @@
       "far_only_secs": 7.699995,
       "double_talk_secs": 3.199999,
       "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0008+1089-134686-0010",
-      "erl_db": 0.0,
-      "erle_db": 48.575275,
-      "near_gain_db": -0.34344867,
-      "reported_delay_ms": 16,
-      "near_only_secs": 5.599997,
-      "far_only_secs": 0.4,
-      "double_talk_secs": 10.800005,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0008+1089-134686-0010",
-      "erl_db": 6.0,
-      "erle_db": 15.198239,
-      "near_gain_db": -0.30710307,
-      "reported_delay_ms": 16,
-      "near_only_secs": 5.599997,
-      "far_only_secs": 1.1000001,
-      "double_talk_secs": 10.100002,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0008+1089-134686-0010",
-      "erl_db": 12.0,
-      "erle_db": 12.400004,
-      "near_gain_db": -0.30146718,
-      "reported_delay_ms": 16,
-      "near_only_secs": 5.599997,
-      "far_only_secs": 2.3,
-      "double_talk_secs": 8.899998,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0008+1089-134686-0010",
-      "erl_db": 18.0,
-      "erle_db": 9.007134,
-      "near_gain_db": -0.30124286,
-      "reported_delay_ms": 16,
-      "near_only_secs": 5.599997,
-      "far_only_secs": 4.499998,
-      "double_talk_secs": 6.699996,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0008+1089-134686-0010",
-      "erl_db": 24.0,
-      "erle_db": 6.0118675,
-      "near_gain_db": -0.30099124,
-      "reported_delay_ms": 16,
-      "near_only_secs": 5.599997,
-      "far_only_secs": 5.499997,
-      "double_talk_secs": 5.699997,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0012+1089-134686-0014",
-      "erl_db": 0.0,
-      "erle_db": 7.933963,
-      "near_gain_db": -0.41161767,
-      "reported_delay_ms": 16,
-      "near_only_secs": 8.499996,
-      "far_only_secs": 0.1,
-      "double_talk_secs": 6.2999964,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0012+1089-134686-0014",
-      "erl_db": 6.0,
-      "erle_db": 7.126698,
-      "near_gain_db": -0.3944664,
-      "reported_delay_ms": 16,
-      "near_only_secs": 8.499996,
-      "far_only_secs": 0.2,
-      "double_talk_secs": 6.1999965,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0012+1089-134686-0014",
-      "erl_db": 12.0,
-      "erle_db": 6.5720882,
-      "near_gain_db": -0.3786075,
-      "reported_delay_ms": 16,
-      "near_only_secs": 8.499996,
-      "far_only_secs": 0.70000005,
-      "double_talk_secs": 5.699997,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0012+1089-134686-0014",
-      "erl_db": 18.0,
-      "erle_db": 5.9059544,
-      "near_gain_db": -0.37004876,
-      "reported_delay_ms": 16,
-      "near_only_secs": 8.499996,
-      "far_only_secs": 1.6000003,
-      "double_talk_secs": 4.799998,
-      "bypassed": null,
-      "output": "mic_aec.wav"
-    },
-    {
-      "id": "1089-134686-0012+1089-134686-0014",
-      "erl_db": 24.0,
-      "erle_db": 4.9948425,
-      "near_gain_db": -0.36998197,
-      "reported_delay_ms": 16,
-      "near_only_secs": 8.499996,
-      "far_only_secs": 2.3,
-      "double_talk_secs": 4.0999985,
-      "bypassed": null,
-      "output": "mic_aec.wav"
+      "output": "mic_aec.wav",
+      "wer_before": 0.08823529411764706,
+      "wer_after": 0.11764705882352941,
+      "wer_delta": 0.029411764705882346,
+      "transcript_changed": true
     }
   ],
+  "normalizer": {
+    "mode": "whisper",
+    "detail": "transformers 4.53.2, english.json sha256:6607f948be98 (1739 entries)",
+    "comparable": true
+  },
   "run": {
-    "when": "2026-09-21T22:14:54+00:00",
-    "git_sha": "6b36730a6fa2d11c20dc6cdae384bb1691370ee4",
-    "git_dirty": false,
+    "when": "2026-09-22T00:25:45+00:00",
+    "git_sha": "6a4e15df5c9562c11bcc7c6b0e0554eb9c61233a",
+    "git_dirty": true,
     "host": {
       "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
       "machine": "arm64",
@@ -260,6 +185,6 @@
       "python": "3.13.7"
     },
     "source_corpus": "librispeech-test-clean",
-    "items": 20
+    "items": 10
   }
 }

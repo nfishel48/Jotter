@@ -1,27 +1,17 @@
 # Echo cancellation sweep
 
-| ERL (dB) | ERLE (dB) | near-end damage (dB) | far-only (s) | double-talk (s) | delay (ms) | used |
-| ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| 0 | 12.5 | -0.2 | 0.1 | 8.0 | 16 | yes |
-| 0 | 13.6 | -0.2 | 0.4 | 10.5 | 16 | yes |
-| 0 | 48.6 | -0.3 | 0.4 | 10.8 | 16 | yes |
-| 0 | 7.9 | -0.4 | 0.1 | 6.3 | 16 | yes |
-| 6 | 10.8 | -0.2 | 0.6 | 7.5 | 16 | yes |
-| 6 | 7.8 | -0.2 | 1.8 | 9.1 | 16 | yes |
-| 6 | 15.2 | -0.3 | 1.1 | 10.1 | 16 | yes |
-| 6 | 7.1 | -0.4 | 0.2 | 6.2 | 16 | yes |
-| 12 | 12.9 | -0.2 | 2.9 | 5.2 | 16 | yes |
-| 12 | 8.8 | -0.2 | 4.2 | 6.7 | 16 | yes |
-| 12 | 12.4 | -0.3 | 2.3 | 8.9 | 16 | yes |
-| 12 | 6.6 | -0.4 | 0.7 | 5.7 | 16 | yes |
-| 18 | 10.5 | -0.2 | 4.6 | 3.5 | 16 | yes |
-| 18 | 9.5 | -0.2 | 6.8 | 4.1 | 16 | yes |
-| 18 | 9.0 | -0.3 | 4.5 | 6.7 | 16 | yes |
-| 18 | 5.9 | -0.4 | 1.6 | 4.8 | 16 | yes |
-| 24 | 7.2 | -0.2 | 6.3 | 1.8 | 16 | yes |
-| 24 | 6.5 | -0.2 | 7.7 | 3.2 | 16 | yes |
-| 24 | 6.0 | -0.3 | 5.5 | 5.7 | 16 | yes |
-| 24 | 5.0 | -0.4 | 2.3 | 4.1 | 16 | yes |
+| ERL (dB) | ERLE (dB) | near-end damage (dB) | far-only (s) | double-talk (s) | delay (ms) | used | WER before | WER after | delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | :--- | ---: | ---: | ---: |
+| 0 | 12.5 | -0.2 | 0.1 | 8.0 | 16 | yes | 50.0% | 33.3% | -16.7% |
+| 0 | 13.6 | -0.2 | 0.4 | 10.5 | 16 | yes | 47.1% | 23.5% | -23.5% |
+| 6 | 10.8 | -0.2 | 0.6 | 7.5 | 16 | yes | 50.0% | 33.3% | -16.7% |
+| 6 | 7.8 | -0.2 | 1.8 | 9.1 | 16 | yes | 67.6% | 14.7% | -52.9% |
+| 12 | 12.9 | -0.2 | 2.9 | 5.2 | 16 | yes | 75.0% | 33.3% | -41.7% |
+| 12 | 8.8 | -0.2 | 4.2 | 6.7 | 16 | yes | 67.6% | 11.8% | -55.9% |
+| 18 | 10.5 | -0.2 | 4.6 | 3.5 | 16 | yes | 11.1% | 30.6% | +19.4% |
+| 18 | 9.5 | -0.2 | 6.8 | 4.1 | 16 | yes | 67.6% | 14.7% | -52.9% |
+| 24 | 7.2 | -0.2 | 6.3 | 1.8 | 16 | yes | 11.1% | 16.7% | +5.6% |
+| 24 | 6.5 | -0.2 | 7.7 | 3.2 | 16 | yes | 8.8% | 11.8% | +2.9% |
 
 `ERL` is how far the speaker bleed sits below the near-end voice — low is hard.
 `ERLE` is echo removed, measured on far-only frames; higher is better.
@@ -30,6 +20,15 @@ near zero is the requirement, and `src/audio/meta.rs` rejects the cancelled
 track below -1 dB however good the ERLE looks.
 `used` says whether the cancelled track was kept, or names the reason the
 pass bypassed.
+`WER before`/`after` are the mic transcript scored against the near speaker's
+words alone, with and without the echo pass in front of it. `delta` is
+negative when cancelling helped; `=` means the transcript did not change at
+all, which is what happens when `meta.rs` rejects the cancelled track and
+both passes end up reading the same audio.
+
+**The delta column is the verdict.** Echo removed in dB is the mechanism, not
+the result: a pass that improves ERLE by 20 dB and moves no words has not
+helped anyone. Read the dB columns to explain the delta, not instead of it.
 
 **Read the far-only column before the ERLE column.** The activity classifier
 (`process::classify`) labels frames by energy, per track, so when the bleed is
