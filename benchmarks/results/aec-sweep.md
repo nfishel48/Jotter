@@ -2,24 +2,26 @@
 
 | ERL (dB) | ERLE (dB) | near-end damage (dB) | far-only (s) | double-talk (s) | delay (ms) | used | WER before | WER after | delta |
 | ---: | ---: | ---: | ---: | ---: | ---: | :--- | ---: | ---: | ---: |
-| 0 | 12.5 | -0.2 | 0.1 | 8.0 | 16 | yes | 50.0% | 33.3% | -16.7% |
-| 0 | 13.6 | -0.2 | 0.4 | 10.5 | 16 | yes | 47.1% | 23.5% | -23.5% |
-| 6 | 10.8 | -0.2 | 0.6 | 7.5 | 16 | yes | 50.0% | 33.3% | -16.7% |
-| 6 | 7.8 | -0.2 | 1.8 | 9.1 | 16 | yes | 67.6% | 14.7% | -52.9% |
-| 12 | 12.9 | -0.2 | 2.9 | 5.2 | 16 | yes | 75.0% | 33.3% | -41.7% |
-| 12 | 8.8 | -0.2 | 4.2 | 6.7 | 16 | yes | 67.6% | 11.8% | -55.9% |
-| 18 | 10.5 | -0.2 | 4.6 | 3.5 | 16 | yes | 11.1% | 30.6% | +19.4% |
-| 18 | 9.5 | -0.2 | 6.8 | 4.1 | 16 | yes | 67.6% | 14.7% | -52.9% |
-| 24 | 7.2 | -0.2 | 6.3 | 1.8 | 16 | yes | 11.1% | 16.7% | +5.6% |
-| 24 | 6.5 | -0.2 | 7.7 | 3.2 | 16 | yes | 8.8% | 11.8% | +2.9% |
+| 0 | 6.1 | -0.4 | 0.6 | 6.0 | 16 | yes | 30.8% | 15.4% | -15.4% |
+| 0 | 14.0 | -0.4 | 0.6 | 10.2 | 16 | yes | 130.4% | 60.9% | -69.6% |
+| 6 | 9.0 | -0.4 | 1.0 | 5.6 | 16 | yes | 26.9% | 0.0% | -26.9% |
+| 6 | 12.8 | -0.3 | 1.7 | 9.1 | 16 | yes | 78.3% | 8.7% | -69.6% |
+| 12 | 5.7 | -0.4 | 1.8 | 4.8 | 16 | no (ERLE 5.7 < 6) | 23.1% | 23.1% | = |
+| 12 | 9.1 | -0.3 | 4.0 | 6.8 | 16 | yes | 65.2% | 4.3% | -60.9% |
+| 18 | 6.3 | -0.4 | 2.6 | 4.0 | 16 | yes | 0.0% | 0.0% | = |
+| 18 | 6.6 | -0.3 | 5.5 | 5.3 | 16 | yes | 69.6% | 8.7% | -60.9% |
+| 24 | 2.8 | -0.4 | 2.7 | 3.9 | 16 | no (ERLE 2.8 < 6) | 0.0% | 0.0% | = |
+| 24 | 2.5 | -0.3 | 5.7 | 5.1 | 16 | no (ERLE 2.5 < 6) | 26.1% | 26.1% | = |
 
 `ERL` is how far the speaker bleed sits below the near-end voice — low is hard.
 `ERLE` is echo removed, measured on far-only frames; higher is better.
 `near-end damage` is level lost off the user's own voice on near-only frames;
 near zero is the requirement, and `src/audio/meta.rs` rejects the cancelled
 track below -1 dB however good the ERLE looks.
-`used` says whether the cancelled track was kept, or names the reason the
-pass bypassed.
+`used` says whether the *recogniser* read the cancelled track — the gate in
+`Meta::preferred_mic_path` — naming the figure that failed when it did not.
+A pass can write a file and still be overruled, and that is not a failure:
+it is the product declining to transcribe audio it judged worse than the raw.
 `WER before`/`after` are the mic transcript scored against the near speaker's
 words alone, with and without the echo pass in front of it. `delta` is
 negative when cancelling helped; `=` means the transcript did not change at
