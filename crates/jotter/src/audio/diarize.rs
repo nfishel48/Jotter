@@ -1002,6 +1002,7 @@ mod tests {
                 declined: Some("models_missing".into()),
                 ..Default::default()
             }),
+            live: None,
         };
         assert!(!Diarize.is_current(&meta));
 

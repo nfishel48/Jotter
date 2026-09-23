@@ -123,6 +123,16 @@ pub const VAD_THRESHOLD: f32 = 0.5;
 const _: () = assert!(VAD_BUFFER_SECS > MAX_SPEECH_SECS);
 const _: () = assert!(MIN_SILENCE_SECS > MIN_SPEECH_SECS);
 
+/// How long before the detector admits to a segment that segment may begin.
+///
+/// Silero only calls speech once it has lasted [`MIN_SPEECH_SECS`], and
+/// sherpa-onnx then backdates the start by two windows so the onset is not
+/// clipped. A segment can therefore start this far before the moment the
+/// detector first reports it; one more window covers how coarsely that moment
+/// is observed. What [`Segmenter::settled_secs`] subtracts.
+const DETECTION_LAG_SECS: f64 =
+    MIN_SPEECH_SECS as f64 + 3.0 * VAD_WINDOW as f64 / ENGINE_RATE as f64;
+
 /// Samples read from a track at a time.
 ///
 /// The conversion to f32 and the resample are done a chunk at a time rather than
@@ -393,11 +403,7 @@ pub fn run_with_progress(
     let started = Instant::now();
     let meta_path = dir.join("meta.json");
     let meta = Meta::read(&meta_path)?;
-
-    let model = match options.model.as_deref() {
-        Some(id) => models::find(id).unwrap_or(models::DEFAULT_TRANSCRIPTION_MODEL),
-        None => models::DEFAULT_TRANSCRIPTION_MODEL,
-    };
+    let model = model_for(options.model.as_deref());
 
     let mut report = TranscriptReport {
         model_id: model.id,
@@ -449,13 +455,16 @@ pub fn run_with_progress(
 
     let resolved = match resolve(model) {
         Ok(resolved) => resolved,
-        Err(decline) => {
+        Err(files) => {
             return finish(
                 dir,
                 &meta_path,
                 meta,
                 report,
-                Some(decline),
+                Some(TranscribeDecline::ModelMissing {
+                    model_id: model.id,
+                    files,
+                }),
                 options,
                 started,
             );
@@ -470,10 +479,7 @@ pub fn run_with_progress(
     }
 
     let transcriber = ParakeetTranscriber::create(&resolved.recognizer)?;
-    let vad_model = resolved
-        .vad
-        .path(Role::Vad)
-        .map(|p| p.to_string_lossy().into_owned());
+    let vad_model = resolved.vad_model();
 
     // The system stream starts at its own instant, so its timestamps have to be
     // moved onto the mic track's before the two can be interleaved. `None` — a
@@ -578,32 +584,47 @@ fn track_sources(meta: &Meta, dir: &Path, wanted: Tracks) -> Vec<Source> {
     sources
 }
 
-/// Both models a run needs, resolved together.
-struct Resolved {
-    recognizer: ResolvedModel,
-    vad: ResolvedModel,
+/// The catalogue entry for a model id, or the default one.
+///
+/// An id the catalogue does not know falls back to the default rather than
+/// failing: the id reaches here from settings and flags, and a transcript from
+/// the default model beats none. Shared with live transcription so the two
+/// cannot pick different models for the same choice.
+pub(crate) fn model_for(id: Option<&str>) -> &'static Model {
+    id.and_then(models::find)
+        .unwrap_or(models::DEFAULT_TRANSCRIPTION_MODEL)
 }
 
-/// Check both models are on disk before any audio is read.
+/// Both models a run needs, resolved together.
+pub(crate) struct Resolved {
+    pub(crate) recognizer: ResolvedModel,
+    pub(crate) vad: ResolvedModel,
+}
+
+impl Resolved {
+    /// The detector's model file, in the form sherpa-onnx's config takes.
+    pub(crate) fn vad_model(&self) -> Option<String> {
+        self.vad
+            .path(Role::Vad)
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+}
+
+/// Check both models are on disk before any audio is read. `Err` is how many
+/// files are missing between them.
 ///
 /// Together, because they are equally fatal and a user who is missing both
 /// should be told once. The counts are summed for the same reason
 /// `MissingAssets` lists every file: "5 files missing" is one `jotter models
 /// pull` away, and reporting them one at a time is not.
-fn resolve(model: &'static Model) -> Result<Resolved, TranscribeDecline> {
+pub(crate) fn resolve(model: &'static Model) -> Result<Resolved, usize> {
     let recognizer = model.resolve();
     let vad = models::SILERO_VAD.resolve();
 
     match (recognizer, vad) {
         (Ok(recognizer), Ok(vad)) => Ok(Resolved { recognizer, vad }),
-        (recognizer, vad) => {
-            let files = recognizer.as_ref().err().map_or(0, |e| e.problems.len())
-                + vad.as_ref().err().map_or(0, |e| e.problems.len());
-            Err(TranscribeDecline::ModelMissing {
-                model_id: model.id,
-                files,
-            })
-        }
+        (recognizer, vad) => Err(recognizer.as_ref().err().map_or(0, |e| e.problems.len())
+            + vad.as_ref().err().map_or(0, |e| e.problems.len())),
     }
 }
 
@@ -619,10 +640,10 @@ pub struct TrackResult {
 /// Read one track, cut it at the pauses, and decode each piece.
 ///
 /// The track is read whole — the established pattern, and what `stage::wav`
-/// exists for — but converted and resampled a chunk at a time, and each speech
-/// segment is decoded and dropped as it appears rather than collected first.
-/// That keeps the peak cost of an hour-long meeting the `i16` track plus a
-/// working set, instead of three copies of it at three sample rates.
+/// exists for — but handed to the [`Segmenter`] a chunk at a time, and each
+/// speech segment is decoded and dropped as it appears rather than collected
+/// first. That keeps the peak cost of an hour-long meeting the `i16` track
+/// plus a working set, instead of three copies of it at three sample rates.
 ///
 /// `pub` for the `bench` binary, which measures word error rate over a corpus
 /// and has to run *this* function rather than a copy of it: a benchmark of a
@@ -639,105 +660,185 @@ pub fn transcribe_track(
     let audio = wav::read_track(path)?;
     let source_rate = audio.sample_rate.max(1);
 
-    let resampler = LinearResampler::create(source_rate as i32, ENGINE_RATE)
-        .ok_or(TranscribeError::Engine("resampler"))?;
-
-    let config = VadModelConfig {
-        silero_vad: SileroVadModelConfig {
-            model: vad_model,
-            threshold: VAD_THRESHOLD,
-            min_silence_duration: MIN_SILENCE_SECS,
-            min_speech_duration: MIN_SPEECH_SECS,
-            window_size: VAD_WINDOW as i32,
-            max_speech_duration: MAX_SPEECH_SECS,
-        },
-        ten_vad: Default::default(),
-        sample_rate: ENGINE_RATE,
-        num_threads: 1,
-        provider: Some("cpu".into()),
-        debug: false,
-    };
-    let vad = VoiceActivityDetector::create(&config, VAD_BUFFER_SECS)
-        .ok_or(TranscribeError::Engine("voice activity detector"))?;
-
-    let mut result = TrackResult {
-        segments: Vec::new(),
-        speech_secs: 0.0,
-    };
-    // The detector wants whole windows, and a resampled chunk is not a whole
-    // number of them. Whatever is left over waits here for the next chunk.
-    let mut pending: Vec<f32> = Vec::with_capacity(VAD_WINDOW * 2);
+    let mut segmenter = Segmenter::new(track, source_rate, vad_model)?;
+    let mut segments = Vec::new();
 
     for (index, chunk) in audio.samples.chunks(CHUNK).enumerate() {
-        let float: Vec<f32> = chunk.iter().map(|&s| s as f32 / 32_768.0).collect();
-        pending.extend(resampler.resample(&float, false));
-        feed(&vad, &mut pending, transcriber, track, &mut result);
+        segmenter.push(chunk, transcriber, &mut segments);
 
         // Cheap, and it does not have to be exact: this is what moves the bar.
         progress((index * CHUNK) as f32 / source_rate as f32);
     }
+    segmenter.finish(transcriber, &mut segments);
 
-    // The resampler holds a tail, the detector holds an unfinished segment, and
-    // a partial window is still audio. Dropping any of the three silently loses
-    // the end of the recording — which, in a meeting, is where the actions are.
-    pending.extend(resampler.resample(&[], true));
-    feed(&vad, &mut pending, transcriber, track, &mut result);
-    if !pending.is_empty() {
-        pending.resize(VAD_WINDOW, 0.0);
-        feed(&vad, &mut pending, transcriber, track, &mut result);
-    }
-    vad.flush();
-    drain(&vad, transcriber, track, &mut result);
-
-    Ok(result)
+    Ok(TrackResult {
+        segments,
+        speech_secs: segmenter.speech_secs(),
+    })
 }
 
-/// Push whole windows into the detector and decode whatever comes out.
-fn feed(
-    vad: &VoiceActivityDetector,
-    pending: &mut Vec<f32>,
-    transcriber: &dyn Transcriber,
-    track: Track,
-    result: &mut TrackResult,
-) {
-    let whole = pending.len() / VAD_WINDOW * VAD_WINDOW;
-    for window in pending[..whole].chunks(VAD_WINDOW) {
-        vad.accept_waveform(window);
-    }
-    pending.drain(..whole);
-    drain(vad, transcriber, track, result);
-}
-
-/// Decode every finished segment the detector is holding.
+/// One track on its way from audio to text: resampled to [`ENGINE_RATE`], cut
+/// at the pauses, and each piece decoded as the detector lets go of it.
 ///
-/// Decoded here, as they appear, rather than collected and decoded afterwards:
-/// a segment's samples are the largest thing in flight, and keeping an hour of
-/// them alive to save a few function calls is the wrong trade.
-fn drain(
-    vad: &VoiceActivityDetector,
-    transcriber: &dyn Transcriber,
+/// The offline pass and live transcription both run through this, and that is
+/// why it exists: the two must build the detector and cut the audio the same
+/// way, or the live transcript and the final one would disagree for reasons
+/// nobody could see. Either way it takes audio a buffer at a time — the
+/// offline pass in [`CHUNK`]-sized pieces of a finished file, the live one in
+/// whatever the audio callback delivered.
+pub(crate) struct Segmenter {
     track: Track,
-    result: &mut TrackResult,
-) {
-    while let Some(speech) = vad.front() {
-        let samples = speech.samples();
-        // `start` counts samples fed to the detector, at the engine's rate, so
-        // this is time from the beginning of *this* track. Putting it on a
-        // shared timeline is the caller's job.
-        let start = speech.start().max(0) as f64 / ENGINE_RATE as f64;
-        let end = start + samples.len() as f64 / ENGINE_RATE as f64;
-        result.speech_secs += (end - start) as f32;
+    resampler: LinearResampler,
+    vad: VoiceActivityDetector,
+    /// The detector wants whole windows, and a resampled buffer is not a whole
+    /// number of them. Whatever is left over waits here for the next one.
+    pending: Vec<f32>,
+    /// Samples handed to the detector so far, at [`ENGINE_RATE`].
+    fed: u64,
+    settled: f64,
+    speech_secs: f32,
+}
 
-        if let Some(text) = transcriber.transcribe(samples) {
-            result.segments.push(Segment {
-                start,
-                end,
-                track,
-                speaker: None,
-                text,
-            });
+impl Segmenter {
+    pub(crate) fn new(
+        track: Track,
+        source_rate: u32,
+        vad_model: Option<String>,
+    ) -> Result<Self, TranscribeError> {
+        let resampler = LinearResampler::create(source_rate.max(1) as i32, ENGINE_RATE)
+            .ok_or(TranscribeError::Engine("resampler"))?;
+
+        let config = VadModelConfig {
+            silero_vad: SileroVadModelConfig {
+                model: vad_model,
+                threshold: VAD_THRESHOLD,
+                min_silence_duration: MIN_SILENCE_SECS,
+                min_speech_duration: MIN_SPEECH_SECS,
+                window_size: VAD_WINDOW as i32,
+                max_speech_duration: MAX_SPEECH_SECS,
+            },
+            ten_vad: Default::default(),
+            sample_rate: ENGINE_RATE,
+            num_threads: 1,
+            provider: Some("cpu".into()),
+            debug: false,
+        };
+        let vad = VoiceActivityDetector::create(&config, VAD_BUFFER_SECS)
+            .ok_or(TranscribeError::Engine("voice activity detector"))?;
+
+        Ok(Self {
+            track,
+            resampler,
+            vad,
+            pending: Vec::with_capacity(VAD_WINDOW * 2),
+            fed: 0,
+            settled: 0.0,
+            speech_secs: 0.0,
+        })
+    }
+
+    /// Take the next stretch of the track, at its recorded rate, and decode
+    /// every segment the detector finishes into `out`.
+    pub(crate) fn push(
+        &mut self,
+        samples: &[i16],
+        transcriber: &dyn Transcriber,
+        out: &mut Vec<Segment>,
+    ) {
+        let float: Vec<f32> = samples.iter().map(|&s| s as f32 / 32_768.0).collect();
+        self.pending.extend(self.resampler.resample(&float, false));
+        self.feed(transcriber, out);
+    }
+
+    /// The track has ended: decode whatever is still held back.
+    pub(crate) fn finish(&mut self, transcriber: &dyn Transcriber, out: &mut Vec<Segment>) {
+        // The resampler holds a tail, the detector holds an unfinished segment,
+        // and a partial window is still audio. Dropping any of the three
+        // silently loses the end of the recording — which, in a meeting, is
+        // where the actions are.
+        self.pending.extend(self.resampler.resample(&[], true));
+        self.feed(transcriber, out);
+        if !self.pending.is_empty() {
+            self.pending.resize(VAD_WINDOW, 0.0);
+            self.feed(transcriber, out);
         }
-        vad.pop();
+        self.vad.flush();
+        self.drain(transcriber, out);
+    }
+
+    /// Which track this is cutting.
+    pub(crate) fn track(&self) -> Track {
+        self.track
+    }
+
+    /// Seconds of the track the detector has seen, on the track's own
+    /// timeline.
+    pub(crate) fn fed_secs(&self) -> f64 {
+        self.fed as f64 / ENGINE_RATE as f64
+    }
+
+    /// Every segment starting before this time, on the track's own timeline,
+    /// has already been handed out.
+    ///
+    /// Stalls while the detector is inside a segment, because that segment's
+    /// start is not known until it ends. Live transcription orders the two
+    /// tracks by this; the offline pass has no use for it.
+    pub(crate) fn settled_secs(&self) -> f64 {
+        self.settled
+    }
+
+    /// Whether the detector is inside a segment it has not finished.
+    pub(crate) fn in_speech(&self) -> bool {
+        self.vad.detected()
+    }
+
+    /// Seconds the detector called speech so far.
+    pub(crate) fn speech_secs(&self) -> f32 {
+        self.speech_secs
+    }
+
+    /// Push whole windows into the detector and decode whatever comes out.
+    fn feed(&mut self, transcriber: &dyn Transcriber, out: &mut Vec<Segment>) {
+        let whole = self.pending.len() / VAD_WINDOW * VAD_WINDOW;
+        for window in self.pending[..whole].chunks(VAD_WINDOW) {
+            self.vad.accept_waveform(window);
+        }
+        self.pending.drain(..whole);
+        self.fed += whole as u64;
+        self.drain(transcriber, out);
+
+        if !self.vad.detected() {
+            self.settled = self.settled.max(self.fed_secs() - DETECTION_LAG_SECS);
+        }
+    }
+
+    /// Decode every finished segment the detector is holding.
+    ///
+    /// Decoded here, as they appear, rather than collected and decoded
+    /// afterwards: a segment's samples are the largest thing in flight, and
+    /// keeping an hour of them alive to save a few function calls is the wrong
+    /// trade.
+    fn drain(&mut self, transcriber: &dyn Transcriber, out: &mut Vec<Segment>) {
+        while let Some(speech) = self.vad.front() {
+            let samples = speech.samples();
+            // `start` counts samples fed to the detector, at the engine's rate,
+            // so this is time from the beginning of *this* track. Putting it on
+            // a shared timeline is the caller's job.
+            let start = speech.start().max(0) as f64 / ENGINE_RATE as f64;
+            let end = start + samples.len() as f64 / ENGINE_RATE as f64;
+            self.speech_secs += (end - start) as f32;
+
+            if let Some(text) = transcriber.transcribe(samples) {
+                out.push(Segment {
+                    start,
+                    end,
+                    track: self.track,
+                    speaker: None,
+                    text,
+                });
+            }
+            self.vad.pop();
+        }
     }
 }
 
@@ -829,6 +930,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         }
     }
 

@@ -30,11 +30,18 @@ telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
 # and the build needs no `meson`/`ninja` — the same kind of guarantee
 # `telemetry` gives for the network stack.
 aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
-# Offline transcription: turning a finished recording into a transcript. Like
-# `aec`, its own stage behind its own flag, so a build can drop the whole
-# inference stack. Off means no ONNX runtime is linked and the model catalogue
-# does not exist — and, since the catalogue is the only thing that knows any
-# download URLs, no model can be fetched either.
+# Offline transcription: turning a finished recording into a transcript, and
+# the live transcript written while a recording is still running. Like `aec`,
+# its own stage behind its own flag, so a build can drop the whole inference
+# stack. Off means no ONNX runtime is linked and the model catalogue does not
+# exist — and, since the catalogue is the only thing that knows any download
+# URLs, no model can be fetched either.
+#
+# Live transcription is not a feature of its own. It adds no dependency and no
+# model this one does not already pull in, so a flag would guard nothing — the
+# cost that justifies `diarize` being separate. A build without `transcribe`
+# still accepts a `LiveConfig`; asking for it declines as unavailable, and the
+# recording is unaffected.
 transcribe = ["dep:sherpa-onnx", "dep:ureq", "dep:sha2"]
 # Speaker diarization: working out which of several people on the system track
 # said each segment, and filling in the `speaker` field `transcript.json` has
@@ -49,6 +56,12 @@ transcribe = ["dep:sherpa-onnx", "dep:ureq", "dep:sha2"]
 # is the reason it is still a flag rather than part of `transcribe`.
 diarize = ["transcribe"]
 
+# Replays a recorded mic.wav/system.wav pair through the live path. An example
+# rather than a test because it needs the speech models on disk and takes as
+# long as the audio does.
+[[example]]
+name = "live_from_wav"
+required-features = ["transcribe"]
 [dependencies]
 # For local-time folder names. Worth the dependency: deriving a DST-correct
 # local offset by hand is a real bug surface, and the default features include

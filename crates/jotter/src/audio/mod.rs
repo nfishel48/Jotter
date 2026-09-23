@@ -12,6 +12,9 @@ pub mod capture;
 pub mod devices;
 #[cfg(feature = "diarize")]
 pub mod diarize;
+// Ungated, like `transcript`: reading `live.jsonl` and the config and status
+// types must not need the inference stack. Only the worker inside is gated.
+pub mod live;
 pub mod meta;
 // Private, re-exported below: `audio::finish` is the name callers should use,
 // and a public `pipeline` module would be a second path to the same items.
@@ -60,6 +63,20 @@ impl Sources {
     fn wants_system(self) -> bool {
         matches!(self, Self::Both | Self::SystemOnly)
     }
+    /// The sources in both, if any. Live transcription uses it to work out
+    /// which recorded tracks it was actually asked for.
+    #[cfg(feature = "transcribe")]
+    fn intersect(self, other: Sources) -> Option<Sources> {
+        match (
+            self.wants_mic() && other.wants_mic(),
+            self.wants_system() && other.wants_system(),
+        ) {
+            (true, true) => Some(Self::Both),
+            (true, false) => Some(Self::MicOnly),
+            (false, true) => Some(Self::SystemOnly),
+            (false, false) => None,
+        }
+    }
 }
 
 /// What to record and where to put it.
@@ -72,6 +89,10 @@ pub struct RecordConfig {
     /// only: on a duplex device cpal records the microphone instead of system
     /// audio, so this is almost never what you want.
     pub allow_duplex_system: bool,
+    /// Transcribe while recording, into `live.jsonl` beside the audio — see
+    /// [`live`]. `None` is a plain recording: no worker, no copies of the
+    /// audio, nothing different on disk.
+    pub live: Option<live::LiveConfig>,
 }
 
 /// A recording in progress.
@@ -83,11 +104,19 @@ pub struct RecordingHandle {
     system: Option<OpenStream>,
     out_dir: PathBuf,
     started_at: SystemTime,
+    live: Option<live::LiveTranscriber>,
 }
 
 impl RecordingHandle {
     pub fn out_dir(&self) -> &Path {
         &self.out_dir
+    }
+
+    /// How live transcription is getting on, or `None` when it was not asked
+    /// for. A decline or a failure shows up here, while the recording carries
+    /// on regardless.
+    pub fn live_status(&self) -> Option<live::LiveStatus> {
+        self.live.as_ref().map(live::LiveTranscriber::status)
     }
 }
 
@@ -95,10 +124,18 @@ impl RecordingHandle {
 pub fn start(config: RecordConfig) -> Result<RecordingHandle, CaptureError> {
     std::fs::create_dir_all(&config.out_dir)?;
 
+    // Before the streams, which take their live feeds as they are built. The
+    // worker loads its model in the background; capture does not wait for it,
+    // and the audio it misses meanwhile waits in the queue.
+    let live = config
+        .live
+        .as_ref()
+        .map(|live| live::LiveTranscriber::start(&config.out_dir, live, config.sources));
+
     let mic = config
         .sources
         .wants_mic()
-        .then(|| capture::open_mic(config.mic, &config.out_dir, meta::MIC_NAME))
+        .then(|| capture::open_mic(config.mic, &config.out_dir, meta::MIC_NAME, live.as_ref()))
         .transpose()?;
 
     let system = config
@@ -110,6 +147,7 @@ pub fn start(config: RecordConfig) -> Result<RecordingHandle, CaptureError> {
                 &config.out_dir,
                 meta::SYSTEM_NAME,
                 config.allow_duplex_system,
+                live.as_ref(),
             )
         })
         .transpose()?;
@@ -124,17 +162,20 @@ pub fn start(config: RecordConfig) -> Result<RecordingHandle, CaptureError> {
         system,
         out_dir: config.out_dir,
         started_at: SystemTime::now(),
+        live,
     })
 }
 
 impl RecordingHandle {
-    /// Stop capturing, flush the WAV files, and write `meta.json`.
+    /// Stop capturing, flush the WAV files, finish the live transcript if
+    /// there is one, and write `meta.json`.
     pub fn stop(self) -> Result<meta::Meta, CaptureError> {
         let RecordingHandle {
             mic,
             system,
             out_dir,
             started_at,
+            live,
         } = self;
 
         // Pause before tearing down the writers so no callback races the
@@ -148,10 +189,16 @@ impl RecordingHandle {
 
         let mic = finish(mic)?;
         let system = finish(system)?;
+        let ended_at = SystemTime::now();
+
+        // After the streams are gone, so every buffer the worker will ever get
+        // is already queued and what it drains now is the whole tail. Bounded:
+        // see `LiveTranscriber::stop`.
+        let live = live.map(live::LiveTranscriber::stop);
 
         let meta = meta::Meta {
             started_at: meta::to_unix_secs(started_at),
-            ended_at: meta::to_unix_secs(SystemTime::now()),
+            ended_at: meta::to_unix_secs(ended_at),
             mic,
             system,
             // Filled in afterwards by `finish`, not here: `stop()` only
@@ -160,6 +207,7 @@ impl RecordingHandle {
             aec: None,
             transcript: None,
             diarization: None,
+            live,
         };
         meta.write(&out_dir.join("meta.json"))?;
         Ok(meta)

@@ -363,6 +363,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         }
         .write(&dir.join("meta.json"))
         .expect("write meta");

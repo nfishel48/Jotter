@@ -12,6 +12,8 @@ use cpal::traits::DeviceTrait;
 use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 
 use super::devices::{self, DeviceChoice, DeviceInfo};
+use super::live::LiveTranscriber;
+use super::transcript::Track;
 use super::writer::{TrackSink, TrackWriter};
 
 /// Which track a failure belongs to. Without this the two streams' errors are
@@ -245,11 +247,13 @@ pub struct OpenStream {
 /// Open the microphone as an ordinary input stream.
 ///
 /// Takes the recording directory and a file name separately so the writer can
-/// keep the two in step — see [`TrackWriter::new`].
+/// keep the two in step — see [`TrackWriter::new`]. `live`, when given, gets a
+/// copy of every buffer if it wants this track.
 pub fn open_mic(
     choice: DeviceChoice,
     dir: &Path,
     file_name: &str,
+    live: Option<&LiveTranscriber>,
 ) -> Result<OpenStream, CaptureError> {
     let (device, info) = devices::resolve_mic(choice)?;
     let config = device
@@ -258,7 +262,7 @@ pub fn open_mic(
             source: Source::Mic,
             err,
         })?;
-    build(device, info, config, dir, file_name, Source::Mic)
+    build(device, info, config, dir, file_name, Source::Mic, live)
 }
 
 /// Open a loopback capture of system audio.
@@ -293,6 +297,7 @@ pub fn open_loopback(
     dir: &Path,
     file_name: &str,
     allow_duplex: bool,
+    live: Option<&LiveTranscriber>,
 ) -> Result<OpenStream, CaptureError> {
     let (device, info) = devices::resolve_system(choice)?;
 
@@ -308,7 +313,7 @@ pub fn open_loopback(
             source: Source::System,
             err,
         })?;
-    build(device, info, config, dir, file_name, Source::System)
+    build(device, info, config, dir, file_name, Source::System, live)
 }
 
 fn build(
@@ -318,12 +323,17 @@ fn build(
     dir: &Path,
     file_name: &str,
     source: Source,
+    live: Option<&LiveTranscriber>,
 ) -> Result<OpenStream, CaptureError> {
     let sample_format = config.sample_format();
     let sample_rate = config.sample_rate();
     let channels = config.channels();
     let stream_config = config.config();
 
+    let timeline = match source {
+        Source::Mic => Track::Mic,
+        Source::System => Track::System,
+    };
     let (track, sink) = TrackWriter::new(
         dir,
         file_name,
@@ -331,6 +341,7 @@ fn build(
         info.id.clone(),
         sample_rate,
         channels,
+        live.and_then(|live| live.feed(timeline, sample_rate)),
     )?;
     let errors = track.error_counter();
 
@@ -353,7 +364,7 @@ fn build(
 fn build_typed<T>(
     device: &Device,
     config: &cpal::StreamConfig,
-    sink: TrackSink,
+    mut sink: TrackSink,
     errors: std::sync::Arc<AtomicU64>,
 ) -> Result<Stream, cpal::Error>
 where

@@ -30,6 +30,7 @@
 //!     system: DeviceChoice::Default,
 //!     out_dir: dir.clone(),
 //!     allow_duplex_system: false,
+//!     live: None,
 //! })?;
 //!
 //! // ... the meeting happens. `RecordingHandle` owns the audio streams, which
@@ -63,6 +64,16 @@
 //! them deliberately, and until then those stages decline with the reason
 //! recorded in `meta.json`.
 //!
+//! # A transcript while the meeting is still going
+//!
+//! Set [`RecordConfig::live`] and the library writes `live.jsonl` into the
+//! recording directory as words are said, one finished segment per line, on the
+//! same timeline as the final transcript. Read it with [`audio::live::read`],
+//! which is the only reader that knows a line still being written is not a line
+//! yet. It never affects the recording: a missing model or a build without
+//! `transcribe` declines, reported by [`RecordingHandle::live_status`] and
+//! recorded in `meta.json`, and capture carries on.
+//!
 //! # macOS
 //!
 //! System-audio capture is gated by TCC, which grants it only to a process with
@@ -79,7 +90,8 @@
 //! - `aec` — echo cancellation, via WebRTC's AudioProcessing built from C++
 //!   source (needs `meson` and `ninja` at build time).
 //! - `transcribe` — transcription and the model catalogue, via a statically
-//!   linked sherpa-onnx.
+//!   linked sherpa-onnx. Live transcription is part of this rather than its
+//!   own feature: it adds no dependency and no model of its own.
 //! - `diarize` — speaker identification. Implies `transcribe`.
 //! - `telemetry` — anonymous usage reporting into **Jotter's** PostHog project.
 //!   Off by default and meant for the `jotter` command only: a host application

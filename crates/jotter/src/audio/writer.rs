@@ -3,7 +3,8 @@
 //! cpal's data callback runs on a realtime audio thread; blocking it on file
 //! I/O causes dropouts. So the callback only does cheap work (downmix to mono,
 //! convert to `i16`) and hands an owned buffer to a writer thread over a
-//! channel.
+//! channel — and, when live transcription is on, a copy of it to the live
+//! worker, on the same terms.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use super::capture::CaptureError;
+use super::live::LiveFeed;
 use super::meta::TrackInfo;
 
 /// Handle to one track's writer thread.
@@ -36,6 +38,9 @@ pub struct TrackSink {
     tx: Sender<Vec<i16>>,
     source_channels: u16,
     first_callback_nanos: Arc<AtomicU64>,
+    /// Where live transcription gets its copy of every buffer. `None` is a
+    /// plain recording, and costs the callback nothing.
+    live: Option<LiveFeed>,
 }
 
 /// Sentinel for "no callback seen yet". A real `StreamInstant` of exactly zero
@@ -43,8 +48,9 @@ pub struct TrackSink {
 const UNSET: u64 = u64::MAX;
 
 impl TrackSink {
-    /// Called from the audio thread for every buffer.
-    pub fn push<T>(&self, data: &[T], first_callback_nanos: u128)
+    /// Called from the audio thread for every buffer, with the instant the
+    /// callback fired.
+    pub fn push<T>(&mut self, data: &[T], callback_nanos: u128)
     where
         T: cpal::Sample,
         f32: cpal::FromSample<T>,
@@ -52,13 +58,20 @@ impl TrackSink {
         self.first_callback_nanos
             .compare_exchange(
                 UNSET,
-                first_callback_nanos.min(u64::MAX as u128) as u64,
+                callback_nanos.min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             )
             .ok();
 
         let out = downmix_to_mono(data, self.source_channels.max(1) as usize);
+
+        if let Some(live) = &mut self.live {
+            // A copy, because the writer thread takes ownership of the
+            // original. Handed over without waiting, or not at all: see
+            // `LiveFeed::try_push`.
+            live.try_push(out.clone(), Some(callback_nanos));
+        }
 
         // A full or disconnected channel means the writer thread is gone or
         // hopelessly behind. Dropping the buffer is the only realtime-safe
@@ -109,6 +122,7 @@ impl TrackWriter {
         device_id: Option<String>,
         sample_rate: u32,
         source_channels: u16,
+        live: Option<LiveFeed>,
     ) -> Result<(TrackWriter, TrackSink), CaptureError> {
         let spec = hound::WavSpec {
             channels: 1,
@@ -142,6 +156,7 @@ impl TrackWriter {
             tx: tx.clone(),
             source_channels,
             first_callback_nanos: Arc::clone(&first_callback_nanos),
+            live,
         };
 
         Ok((
