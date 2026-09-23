@@ -108,9 +108,13 @@ Triggered by a push to `main`:
 flowchart LR
     T["test<br/><i>calls ci.yml</i>"] --> V["version<br/>work out the number"]
     V --> M["build-macos<br/>arm64 · native<br/>.app + zip"]
-    V --> L["build-linux<br/>x86_64"]
+    V --> L["build-linux<br/>x86_64 · Debian 12<br/>tar.gz + .deb + .rpm"]
+    L --> I["install-test<br/>debian 12/13 · ubuntu 24.04 · fedora"]
     M --> R["publish<br/>commit + tag + push<br/>gh release create"]
-    L --> R
+    I --> R
+    R --> P["publish-repos<br/>apt + dnf on Pages"]
+    R --> H["publish-tap<br/>Homebrew formula"]
+    R --> A["publish-aur<br/>jotter-bin"]
 ```
 
 1. **test** — the full CI matrix. Nothing ships if it fails.
@@ -122,9 +126,14 @@ flowchart LR
    tagged) and build only the shipped binary, with
    `cargo build --release --locked -p jotter-cli --bin jotter`. The macOS job
    then asserts the binary is arm64, wraps it with `bundle.sh` and zips the
-   `.app`. Nothing is committed here either.
-4. **publish** — re-applies the bump, commits, tags `vX.Y.Z`, pushes, and
+   `.app`. The Linux job runs in a Debian 12 container and packages the binary
+   with `scripts/package_linux.sh`. Nothing is committed here either.
+4. **install-test** — installs the `.deb` or `.rpm` on each supported
+   distribution and runs it (see below).
+5. **publish** — re-applies the bump, commits, tags `vX.Y.Z`, pushes, and
    publishes with `gh release create`.
+6. **publish-repos** / **publish-tap** / **publish-aur** — put the release
+   into the package managers. See *Distribution* below.
 
 `concurrency: release` with `cancel-in-progress: false` — two runs would race on
 the version number and could claim the same one twice, but a run that has
@@ -206,7 +215,12 @@ workflow runs. The `[skip ci]` in the commit message is belt-and-braces.
 | Platform | Artifact | Notes |
 | --- | --- | --- |
 | macOS | `Jotter-X.Y.Z-macos-arm64.zip` | `Jotter.app`, Apple Silicon only |
-| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` command-line binary |
+| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` binary, `LICENSE`, and `docs/AUDIO_CAPTURE.md` as `README.md` |
+| Linux | `jotter_X.Y.Z-1_amd64.deb` | Debian 12+, Ubuntu 24.04+ |
+| Linux | `jotter-X.Y.Z-1.x86_64.rpm` | Fedora, openSUSE |
+
+All three Linux artifacts carry the same binary. None of them strip it:
+telemetry's crash reports are symbolicated from its symbols.
 
 **macOS ships the `.app`, not a bare binary** — and this is not cosmetic. macOS
 will not grant system-audio access to an executable with no bundle identity; it
@@ -236,13 +250,114 @@ Note for future packaging: outbound HTTPS needs no macOS entitlement today
 because the bundle is ad-hoc signed with no App Sandbox. Mac App Store
 distribution would require `com.apple.security.network.client`.
 
+## Distribution
+
+| Channel | Install | Source in this repo | Published by | Status |
+| --- | --- | --- | --- | --- |
+| apt | `apt install jotter`, after adding the repository | `[package.metadata.deb]` in `crates/jotter-cli/Cargo.toml` | `publish-repos` → GitHub Pages | live |
+| dnf | `dnf install jotter`, after adding the repository | `[package.metadata.generate-rpm]`, same file | `publish-repos` → GitHub Pages | live |
+| Homebrew (macOS) | `brew install nfishel48/tap/jotter` | `packaging/homebrew/jotter.rb` | `publish-tap` → `nfishel48/homebrew-tap` | setup pending, #23 |
+| AUR | `yay -S jotter-bin` | `packaging/aur/PKGBUILD` | `publish-aur` → `aur.archlinux.org/jotter-bin` | setup pending, #24 |
+
+These jobs run after `publish`, so the GitHub release already exists when they
+start. If one fails, the release is still out and the other channels are not
+affected; fix the cause and re-run the failed job.
+
+`publish-tap` and `publish-aur` are skipped unless the repository variable
+`PUBLISH_HOMEBREW` or `PUBLISH_AUR` is `true`. Setting the variable is the last
+step of setting up that channel, so no release fails for a channel that does
+not exist yet. The README and release notes list a channel only once it is live.
+
+### Why Linux builds on Debian 12
+
+A binary needs at least the glibc it was linked against. Built on
+`ubuntu-latest` (24.04, glibc 2.39) it would not start on Debian 12 (2.36), the
+oldest release Jotter supports. So `build-linux` runs in `rust:1-bookworm`,
+with dependencies from `scripts/linux_release_deps.sh`. Meson comes from PyPI
+there, because bookworm's meson 1.0 cannot build the bundled WebRTC. The
+binary's symbols require GLIBC_2.34 and GLIBCXX_3.4.30 (GCC 12), and the `.deb`
+declares exactly that.
+
+The `.deb` names its libraries by hand rather than with cargo-deb's `$auto`.
+Debian 13 and Ubuntu 24.04 renamed both of them in the 64-bit time_t transition
+(`libasound2t64`, `libpipewire-0.3-0t64`), so each dependency accepts either
+name. The `.rpm` needs no such care: its `Requires` are sonames, which each RPM
+distribution maps to its own package names.
+
+**install-test** is what enforces this. It installs the package on Debian 12,
+Debian 13, Ubuntu 24.04 and Fedora, fails if `ldd` reports a library as
+`not found`, and checks `jotter --version`. It cannot test capture, because
+containers have no PipeWire session.
+
+Reproduce the job locally, packages and all, with
+`scripts/check_linux_build.sh package`. The output goes to `dist/`, built for
+the host architecture (arm64 on Apple Silicon).
+
+### The apt and dnf repositories
+
+`scripts/build_package_repo.sh` builds both repositories from the last three
+releases' packages. They are served at `https://nfishel48.github.io/Jotter/`,
+deployed as a Pages artifact rather than committed to a branch. The site is
+rebuilt from scratch on every release, so it holds three versions and git
+history never grows. The apt `InRelease`, the dnf `repomd.xml` and each `.rpm`
+are signed with one GPG key. Its public half is published as `jotter.asc`, and
+`jotter.sources` and `jotter.repo` point apt and dnf at it.
+
+### Homebrew: a formula, not a cask
+
+Homebrew quarantines cask downloads. Because `Jotter.app` is ad-hoc signed and
+not notarized, Gatekeeper would refuse it, and Homebrew no longer offers a way
+around that. A formula's download is not quarantined. The formula installs
+`Jotter.app` into its keg and links `jotter` to the binary inside it, and
+`jotter` resolves that symlink to find the bundle. `publish-tap` installs and
+tests the rendered formula on a macOS runner before pushing it.
+
+Once releases are signed with a Developer ID and notarized, switch to a cask
+that installs to `/Applications`. That also keeps the TCC grant across
+upgrades, which an ad-hoc signature does not.
+
+### One-time setup
+
+| What | Where |
+| --- | --- |
+| Pages source: **GitHub Actions** | Settings → Pages |
+| `REPO_GPG_PRIVATE_KEY` secret: an armored private key with no passphrase | Settings → Secrets → Actions |
+
+Homebrew, once its setup is done (#23):
+
+| What | Where |
+| --- | --- |
+| `nfishel48/homebrew-tap` repository, initialised with a README | GitHub |
+| `HOMEBREW_TAP_TOKEN` secret: fine-grained token, *Contents: read and write* on the tap only | Settings → Secrets → Actions |
+| `PUBLISH_HOMEBREW` variable: `true` | Settings → Variables → Actions |
+
+The AUR, once its setup is done (#24):
+
+| What | Where |
+| --- | --- |
+| An AUR account with an SSH key | aur.archlinux.org → My Account |
+| `AUR_SSH_PRIVATE_KEY` secret: the private half of that key | Settings → Secrets → Actions |
+| `PUBLISH_AUR` variable: `true` | Settings → Variables → Actions |
+
+To generate the signing key:
+
+```sh
+export GNUPGHOME="$(mktemp -d)"
+gpg --batch --passphrase '' --quick-gen-key "Jotter packages <nfishel@proton.me>" ed25519 sign never
+gpg --armor --export-secret-keys | gh secret set REPO_GPG_PRIVATE_KEY
+```
+
+Keep a copy of the key somewhere safe. If it is replaced, every user has to
+download `jotter.asc` again.
+
 ## Known limitations
 
 - **Not notarized.** The bundle is ad-hoc signed, because there are no signing
-  identities on this machine. Gatekeeper will block it on first launch;
-  the release notes tell users to clear the quarantine attribute. Proper
-  notarization needs a paid Apple Developer account and
-  `APPLE_ID` / `APPLE_TEAM_ID` / app-specific-password secrets.
+  identities on this machine. A downloaded zip is blocked on first launch, and
+  the release notes tell users to clear the quarantine attribute (the Homebrew
+  formula avoids this; see *Distribution*). Every upgrade asks for audio
+  permissions again. Proper notarization needs a paid Apple Developer account
+  and `APPLE_ID` / `APPLE_TEAM_ID` / app-specific-password secrets.
 - **Linux is compile-verified only** — no runtime confirmation against a live
   PipeWire session. The release notes say so.
 - **No Windows build.** The loopback idiom is the same and WASAPI loopback is

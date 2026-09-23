@@ -1,0 +1,29 @@
+# Maintainer: Nathan Fishel <nfishel@proton.me>
+#
+# Template for the jotter-bin AUR package. release.yml's publish-aur job sets
+# pkgver, fills in the checksum with updpkgsums, regenerates .SRCINFO and
+# pushes; edit this file, not the AUR's copy.
+pkgname=jotter-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Record meetings as two tracks and transcribe them on-device"
+arch=('x86_64')
+url="https://github.com/nfishel48/Jotter"
+license=('MIT')
+# The binary's NEEDED libraries, by the Arch package that ships each.
+depends=('glibc' 'libgcc' 'libstdc++' 'alsa-lib' 'libpipewire')
+optdepends=('pipewire: the sound server system-audio capture records through')
+provides=('jotter')
+conflicts=('jotter')
+# The release binary is not stripped: telemetry's crash reports are
+# symbolicated from its symbols.
+options=('!strip' '!debug')
+source=("https://github.com/nfishel48/Jotter/releases/download/v$pkgver/jotter-$pkgver-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "jotter-$pkgver-linux-x86_64"
+  install -Dm755 jotter "$pkgdir/usr/bin/jotter"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

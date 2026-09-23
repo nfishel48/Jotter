@@ -3,6 +3,8 @@
 /recordings
 .DS_Store
 /build
+# Linux packages from scripts/package_linux.sh, and the repository built from them.
+/dist
 #ignore my bash scripts used for testing locally
 *.sh
 # ...but scripts/ is project tooling, not scratch work, and CI shells out to it

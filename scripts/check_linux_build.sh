@@ -13,6 +13,8 @@
 #   scripts/check_linux_build.sh          # cargo check
 #   scripts/check_linux_build.sh build    # full cargo build (slower)
 #   scripts/check_linux_build.sh ci       # what ci.yml runs on ubuntu-latest
+#   scripts/check_linux_build.sh package  # what release.yml's build-linux does:
+#                                         # Debian 12 release build -> dist/
 
 set -euo pipefail
 
@@ -24,6 +26,31 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if ! docker info >/dev/null 2>&1; then
   echo "Docker is not running. Start Docker Desktop and retry." >&2
   exit 1
+fi
+
+# The release build, reproduced: Debian 12 rather than trixie (glibc baseline;
+# see linux_release_deps.sh), and packaged into dist/. The target directory and
+# cargo registry live in named volumes so a second run does not start cold.
+# The packages come out at the host's architecture (arm64 on Apple Silicon),
+# which exercises the same packaging as the x86_64 release.
+if [ "$CMD" = "package" ]; then
+  echo "==> release build and packages for Linux (Debian 12 baseline)"
+  docker run --rm -t \
+    -v "$ROOT":/src \
+    -v jotter-bookworm-target:/target \
+    -v jotter-bookworm-cargo:/usr/local/cargo/registry \
+    -w /src \
+    -e CARGO_TARGET_DIR=/target \
+    -e VERSION \
+    rust:1-bookworm \
+    bash -c '
+      set -e
+      scripts/linux_release_deps.sh
+      rustc --version
+      cargo build --release --locked -p jotter-cli --bin jotter
+      scripts/package_linux.sh
+    '
+  exit 0
 fi
 
 # The container runs at the host's architecture — aarch64 on Apple Silicon —
