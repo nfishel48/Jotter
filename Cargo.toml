@@ -16,7 +16,7 @@ resolver = "3"
 # CLI reporting a different version from the library it was built with would
 # only ever confuse a bug report. `scripts/bump_version.sh` rewrites this line.
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 repository = "https://github.com/nfishel48/Jotter"
 license = "MIT"
