@@ -62,8 +62,9 @@ fn record_config(session: &SessionState) -> RecordConfig {
             .map_or(DeviceChoice::Default, DeviceChoice::Id),
         out_dir: session.dir.clone(),
         allow_duplex_system: false,
-        // Wired in by the context command, not here.
-        live: None,
+        // The session file is the only place `--no-live` is recorded, so the
+        // recorder and `jotter status` cannot disagree about it.
+        live: session.live.then(jotter::audio::live::LiveConfig::default),
     }
 }
 
@@ -174,4 +175,33 @@ fn fail(file: &SessionFile, session: &SessionState, error: CliError) -> CliError
         s.error = Some(error.clone());
     });
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::SourcesArg;
+
+    fn session(live: bool) -> SessionState {
+        SessionState {
+            session_id: "id".into(),
+            state: Phase::Recording,
+            pid: 1,
+            exe: PathBuf::from("jotter"),
+            dir: PathBuf::from("/tmp/rec"),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            sources: SourcesArg::Mic,
+            mic: None,
+            system: None,
+            live,
+            log: PathBuf::from("/tmp/session.log"),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn the_session_flag_is_what_the_recorder_runs() {
+        assert!(record_config(&session(true)).live.is_some());
+        assert!(record_config(&session(false)).live.is_none());
+    }
 }
