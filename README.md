@@ -34,12 +34,19 @@ Then either transcribe an existing recording:
 jotter transcribe ~/Documents/Jotter/2026-09-15_14-32-08
 ```
 
-or have every recording transcribed as it finishes by setting
-`"transcribe_enabled": true` in `settings.json` (see below), or for a single run:
+or have every recording transcribed as it finishes with
+`jotter config set transcribe true`, or for a single run:
 
 ```bash
 jotter record --transcribe --duration 600
 ```
+
+`jotter record` blocks until the recording ends. To record in the background
+and get on with something else, `jotter start` launches a recorder and returns
+at once; `jotter status` shows whether it is running and `jotter stop` ends it
+and runs the same offline passes. On macOS the recorder runs inside
+`Jotter.app`, which is what carries the microphone and system-audio
+permissions.
 
 That writes `transcript.json` beside the audio. Your microphone and everyone
 else's audio are transcribed separately and merged onto one timeline, so each
@@ -84,12 +91,19 @@ one run) and needs two more models (~44 MB), fetched by the same `jotter models 
 ## Settings
 
 There is no settings window: Jotter is a command-line tool, and the few
-preferences it keeps live in one JSON file.
+preferences it keeps live in one JSON file. Change them with `jotter config`
+rather than editing it by hand:
+
+```bash
+jotter config                       # show every setting
+jotter config set transcribe true   # transcribe every recording
+jotter config set speakers 4        # how many people are on your calls
+```
 
 - macOS — `~/Library/Application Support/Jotter/settings.json`
 - Linux — `${XDG_CONFIG_HOME:-~/.config}/jotter/settings.json`
 
-`jotter telemetry` prints the exact path.
+`jotter config` prints the exact path.
 
 | Key | Default | What it does |
 | --- | --- | --- |

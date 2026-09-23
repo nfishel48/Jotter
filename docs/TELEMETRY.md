@@ -13,7 +13,7 @@ Any one of these is sufficient, and each takes effect immediately:
 
 | How | Where |
 | --- | --- |
-| `jotter telemetry --disable` | Terminal; `jotter telemetry` shows current state, `--enable` turns it back on |
+| `jotter telemetry --disable`, or `jotter config set telemetry false` | Terminal; `jotter telemetry` shows current state, `--enable` turns it back on |
 | `DO_NOT_TRACK=1` | Environment ([consoledonottrack.com](https://consoledonottrack.com)) |
 | `JOTTER_TELEMETRY=0` | Environment; overrides the stored setting either way |
 | `cargo build -p jotter-cli --no-default-features --features aec,transcribe,diarize` | Build with no telemetry code at all — no HTTP client, no async runtime |
@@ -41,8 +41,12 @@ notice of.
 The first time Jotter runs with telemetry active — a build with an API key, and
 nothing above turning it off — it prints a one-time notice to stderr saying what
 is sent and how to stop it, then records `telemetry_notice_seen` in
-`settings.json` so it is not repeated. Running `jotter telemetry --enable` or
-`--disable` also marks it seen: having made the choice, you have read enough.
+`settings.json` so it is not repeated. The notice is for a person: it is
+suppressed, and not marked seen, when output is piped or `--json` is set, so a
+user who only drives the command from a script is told the first time they run
+it at a terminal. Running `jotter telemetry --enable` or `--disable`, or
+`jotter config set telemetry`, also marks it seen: having made the choice, you
+have read enough.
 
 ### Using Jotter as a library
 

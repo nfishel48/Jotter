@@ -1386,9 +1386,11 @@ dependencies = [
 name = "jotter-cli"
 version = "0.1.16"
 dependencies = [
+ "chrono",
  "clap",
  "hound",
  "jotter",
+ "libc",
  "serde",
  "serde_json",
  "sherpa-onnx",
