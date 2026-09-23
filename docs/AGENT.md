@@ -8,8 +8,8 @@ The procedure — when to start, how to pull what has been said, what not to do 
 
 - `--json` on every call. One JSON object on stdout, or one object per line for a stream. Errors are `{"error":{"kind":"<snake_case>","message":"..."}}` on stdout, with a non-zero exit. Branch on `kind`. Do not scrape English.
 - A meeting the agent must keep working through is `jotter start`, then `jotter context`, then `jotter stop`. `jotter record` blocks until the recording ends; it is the human-oriented command.
-- Live transcription is on unless `start --no-live`. `jotter context` reads the active session, or `--dir`, or the most recent recording, and prefers `transcript.json` once the recording has been finished. `jotter recordings` lists earlier meetings.
-- Those three behaviours are the Wave 3 contract. They were **not** in `origin/trunk/cli-agent` at `1f7dbd6`: that binary has no `context` or `recordings` subcommand, and `start --help` still says live transcription is unavailable. Do not paper over a missing subcommand by parsing `live.jsonl`.
+- Live transcription is on unless `start --no-live`, and that bool is not gated on `config transcribe`. `jotter context` reads the active session, or `--dir`, or the most recent recording. It serves `transcript.json` (`source` `"transcript"`, `complete` true, `cursor` null) only once capture has finished and that file exists; otherwise it serves the live lines. `jotter recordings` lists recent recordings under `~/Documents/Jotter`, plus the active session if its directory is outside that root.
+- If `context` or `recordings` is an unrecognized subcommand, the installed `jotter` is older than this skill. Say so. Do not parse `live.jsonl` to compensate.
 
 ## Privacy
 
