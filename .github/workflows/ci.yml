@@ -10,14 +10,17 @@ on:
   workflow_call: # so release.yml can gate on exactly this suite
 
 concurrency:
-  # Supersede in-flight runs for the same branch; the newest push is the one
-  # anyone cares about.
-  #
-  # github.workflow is included because in a reusable workflow it resolves to
-  # the *caller's* name ("Release"), keeping release runs in a separate group
-  # from direct CI runs. Without it both evaluate to the same key and cancel
-  # each other.
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Key on the branch name, not github.ref. A push is refs/heads/<branch> and
+  # the pull_request run is refs/pull/N/merge, so a ref key let both finish
+  # and write two caches. head_ref is set only on pull_request, so both events
+  # share this group. cancel-in-progress stays on: the older run is dropped.
+  # The pull_request run (the merge commit) is the one that should survive —
+  # GitHub opens it after the push, and a later push is followed by
+  # pull_request synchronize, which cancels that push and keeps the merge
+  # commit. github.workflow stays in the key because in a reusable workflow it
+  # resolves to the *caller's* name ("Release"), keeping release runs in a
+  # separate group from direct CI runs.
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -43,9 +46,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Save only on the branches PRs actually restore from. A feature-branch
+      # or PR cache is 1.2–1.9 GB and evicts trunk's, so the next trunk build
+      # is cold (11–20 min). save-if false still restores; PRs read the base
+      # ref's cache. See docs/CI_CD.md.
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/trunk/cli-agent' }}
 
       # sherpa-onnx-sys unpacks its prebuilt static libraries into
       # target/sherpa-onnx-prebuilt, which is not a Cargo profile directory,
@@ -64,13 +72,54 @@ jobs:
               -prune -exec rm -rf {} +
           fi
 
+      # Install only. Do not set SCCACHE_GHA_ENABLED — the cache step below
+      # persists the local disk backend.
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      # One entry per OS/arch/webrtc version, not per branch: the C++ objects
+      # are content-addressed, and a per-ref archive would evict trunk the
+      # same way the Cargo cache used to.
+      - name: Webrtc version for the sccache key
+        id: webrtc
+        shell: bash
+        run: |
+          ver=$(awk '
+            $0 == "name = \"webrtc-audio-processing-sys\"" { found = 1; next }
+            found && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.lock)
+          if [ -z "$ver" ]; then
+            echo "webrtc-audio-processing-sys version missing from Cargo.lock" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      # Local disk, not the GHA backend: that one writes an Actions cache
+      # entry per object and fights the Cargo cache for the 10 GB cap.
+      # `runner` is not legal in job env, and actions/cache does not expand
+      # `~` (macOS's default sccache dir is not ~/.cache either).
+      - name: Persist sccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.os == 'Linux' && '/home/runner/.cache/sccache' || '/Users/runner/.cache/sccache' }}
+          key: sccache-${{ runner.os }}-${{ runner.arch }}-webrtc-audio-processing-${{ steps.webrtc.outputs.version }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ runner.arch }}-webrtc-audio-processing-
+
       # The `aec` feature builds WebRTC's AudioProcessing from source, which is
       # an autotools/meson project. `bundled` is deliberate: linking a system
       # libwebrtc-audio-processing would make the build depend on a package most
       # distros ship at a different major version.
+      #
+      # CC/CXX wrap clang so a feature-matrix leg that re-runs meson hits
+      # sccache instead of compiling WebRTC again (~100s macOS, ~70s Linux).
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install pkg-config meson ninja
+        run: |
+          brew install pkg-config meson ninja
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "CC=sccache clang" >> "$GITHUB_ENV"
+          echo "CXX=sccache clang++" >> "$GITHUB_ENV"
 
       # Needed to *compile* on Linux, not to run: the pipewire/alsa -sys crates
       # need real headers, and `aec` builds WebRTC's C++ with meson.
@@ -94,22 +143,25 @@ jobs:
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
             libasound2-dev liblzma-dev
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "CC=sccache clang" >> "$GITHUB_ENV"
+          echo "CXX=sccache clang++" >> "$GITHUB_ENV"
 
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked
-
-      # Runners are headless with no audio devices, so the suite deliberately
-      # covers only pure logic — conversion, downmix, the loopback duplex
-      # guard, metadata. Anything touching cpal device enumeration would be
-      # flaky here and belongs in scripts/check_audio.sh instead.
+      # Test before clippy so clippy reuses this build. `cargo test` already
+      # compiles the workspace, so a following `cargo build --workspace` only
+      # rebuilt webrtc-audio-processing-sys. Clippy args do not change the
+      # rustc fingerprint (RUSTFLAGS already denies warnings), so this shares
+      # that build. Not `--no-deps`: that would skip dependency lints and can
+      # hide a warning the workspace command is here to catch.
       - name: Test
         run: cargo test --workspace --all-targets --locked
 
-      - name: Build
-        run: cargo build --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # The benchmark harness. Linux only: it is the same Python everywhere and
       # paying for it three times buys nothing.
@@ -122,6 +174,13 @@ jobs:
       # writes parseable output, and `recording.py` still produces a meta.json
       # that Jotter parses. That last one is the guard on the only place the
       # harness duplicates a format the Rust owns.
+      - name: Cache benchmark virtualenv
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.venv
+          key: bench-venv-${{ runner.os }}-${{ hashFiles('benchmarks/requirements.txt') }}
+
       - name: Benchmark harness
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -136,11 +195,13 @@ jobs:
       # combination a hard failure here. `-p` matters: features are selected
       # per package, and a bare `--no-default-features` at the workspace root
       # would build neither crate the way anyone depends on it.
+      #
+      # The plain `cargo check -p jotter` leg (library defaults, no telemetry)
+      # is gone: it re-unified features against the workspace build `test`
+      # just produced and rebuilt webrtc-audio-processing-sys for no new cfg.
+      # The legs below are the ones whose feature sets actually differ.
       - name: Build (feature matrix)
         run: |
-          # The library exactly as a host application gets it from a plain
-          # dependency: every stage, no telemetry.
-          cargo check --locked -p jotter
           # Capture alone. A host that only records must not need meson, a C++
           # toolchain, an ONNX runtime or any network code, and the only way
           # that stays true is by checking it.
