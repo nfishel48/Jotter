@@ -6,7 +6,9 @@
 //! embedding it gets the same behaviour this command has.
 
 mod cli;
+mod context;
 mod output;
+mod recordings;
 mod report;
 mod session;
 mod settings;

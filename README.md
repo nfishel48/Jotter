@@ -56,6 +56,35 @@ segment already says whether it was you or the room:
 { "start": 0.42, "end": 3.10, "track": "mic", "text": "morning all" }
 ```
 
+## Listening to a meeting
+
+`jotter start` transcribes while it records, into `live.jsonl` beside the audio,
+unless you pass `--no-live`. The lines are a second or two behind the room, and
+they are the rough copy: the final `transcript.json`, written when the recording
+stops, is the one to keep.
+
+```bash
+jotter start --json
+jotter context --json                  # what has been said so far
+jotter context --since live:1a4 --json # only lines past that cursor
+jotter context --last 30 --json        # the last 30 seconds
+jotter context --follow                # one JSON object per new segment, until the session ends
+jotter status --json                   # session.live is {state, segments, last_end_secs}
+jotter recordings --json               # recent recordings and which files they have
+jotter stop --json
+```
+
+While the session is recording and `live.jsonl` is still empty, `status` reports
+live state `starting` with `segments` 0. The first line moves it to `running`.
+A missing model, or a live pass that broke, shows up as `declined` or `failed`
+once `stop` has written `meta.json`; the recording itself is unaffected.
+
+`context` reads the active session. Pass `--dir` to read some other recording,
+or leave both off and it reads the most recent one under `~/Documents/Jotter`.
+Once that recording has finished and `transcript.json` is there, that file is
+what comes back (`source` `"transcript"`, `complete` true), including `speaker`
+when diarization has labelled a segment.
+
 ## Who said it
 
 `track` already separates you from everyone else, for free — that is the whole

@@ -22,7 +22,9 @@ use jotter::audio::{
 use jotter::config::{self, Settings};
 use jotter::telemetry::{Prop, Surface, Telemetry, events};
 
+use crate::context;
 use crate::output::{CliError, ErrorKind, Output};
+use crate::recordings;
 #[cfg(any(feature = "aec", feature = "transcribe"))]
 use crate::report;
 use crate::report::RecordingJson;
@@ -45,10 +47,41 @@ pub enum Command {
     Config(settings::ConfigArgs),
     /// Start recording in the background and return at once
     Start(session::StartArgs),
-    /// Show whether a background recording is running
+    /// Show whether a background recording is running.
+    ///
+    /// `--json` is `{active, session?, stale?}`. When the session transcribes
+    /// as it records, `session.live` is
+    /// `{state, segments, last_end_secs}`: `state` is `starting` while
+    /// `live.jsonl` is still empty (`segments` 0), `running` once a line has
+    /// landed, or `declined`/`failed` once `meta.json` records that the pass
+    /// refused or broke. `live` is null when the session was started with
+    /// `--no-live`.
     Status,
     /// Stop the background recording, then run the offline passes
     Stop(session::StopArgs),
+    /// Read what has been said so far.
+    ///
+    /// The active session by default. `--dir` reads that recording instead;
+    /// with neither, the most recent recording under ~/Documents/Jotter.
+    /// `--json` is one object: `{dir, source: "live"|"transcript", complete,
+    /// cursor, segments: [{track, speaker?, start, end, text}]}`. `source` is
+    /// `transcript` and `complete` is true once the recording has finished and
+    /// `transcript.json` is there (`cursor` is null). Otherwise `source` is
+    /// `live`, `complete` is false, and `cursor` (`live:<hex>`) resumes with
+    /// `--since`. `--follow` prints one JSON object per new segment —
+    /// `{cursor, track, speaker?, start, end, text}` — until the session ends,
+    /// even without `--json`, and errors with `no_session` when nothing is
+    /// recording. Several lines from one read share a cursor; `--since` that
+    /// value skips all of them.
+    Context(context::ContextArgs),
+    /// List recent recordings, newest first.
+    ///
+    /// `--json` is `{"recordings":[{dir, started_at, duration_secs,
+    /// artifacts}]}`. `artifacts` is a boolean for each of `mic.wav`,
+    /// `system.wav`, `live.jsonl`, `transcript.json` and `mic_aec.wav`.
+    /// `started_at` (RFC3339) and `duration_secs` are null until the recording
+    /// has been finalised. `--limit` defaults to 10.
+    Recordings(recordings::RecordingsArgs),
     /// Download and inspect the speech models transcription needs
     #[cfg(feature = "transcribe")]
     Models(ModelsArgs),
@@ -301,13 +334,17 @@ impl From<SourcesArg> for Sources {
 pub fn run(command: Command, out: Output) -> Result<(), CliError> {
     // Before any reporting client starts. `telemetry` and `config` edit the
     // settings file, and starting a reporting client in order to turn
-    // reporting off would be a strange thing to do; `status` is polled, and
-    // reporting every poll would drown out everything else; the recorder
-    // reports its own events and has no terminal to show a notice on.
+    // reporting off would be a strange thing to do. `status`, `context` and
+    // `recordings` are polled — reporting every poll would drown out the
+    // recording itself, and `--follow` can sit open for the whole meeting.
+    // The recorder reports its own events and has no terminal to show a
+    // notice on.
     match command {
         Command::Telemetry(args) => return telemetry_command(args, out),
         Command::Config(args) => return settings::config(args, out),
         Command::Status => return session::status(out),
+        Command::Context(args) => return context::run(args, out),
+        Command::Recordings(args) => return recordings::run(args, out),
         Command::SessionRun(args) => return session::recorder::run(args),
         _ => {}
     }
@@ -341,7 +378,12 @@ pub fn run(command: Command, out: Output) -> Result<(), CliError> {
         Command::Transcribe(args) => transcribe(args, &telemetry, out),
         #[cfg(feature = "diarize")]
         Command::Diarize(args) => diarize(args, &telemetry, out),
-        Command::Telemetry(_) | Command::Config(_) | Command::Status | Command::SessionRun(_) => {
+        Command::Telemetry(_)
+        | Command::Config(_)
+        | Command::Status
+        | Command::Context(_)
+        | Command::Recordings(_)
+        | Command::SessionRun(_) => {
             unreachable!("handled above")
         }
     };

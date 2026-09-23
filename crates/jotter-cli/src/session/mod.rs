@@ -23,10 +23,11 @@ use jotter::audio::{self, FinishOptions};
 use jotter::config::{self, Settings};
 use jotter::telemetry::{Surface, Telemetry, events};
 
-use self::state::{Lookup, Phase, SessionFile, SessionState, StopLock};
+use self::state::StopLock;
 use crate::cli::SourcesArg;
 use crate::output::{CliError, ErrorKind, Output};
 use crate::report::RecordingJson;
+pub(crate) use state::{Lookup, Phase, SessionFile, SessionState};
 
 /// How long `jotter start` waits for the recorder to report that it is
 /// capturing, and how long `jotter stop` waits for it to finish.
@@ -63,8 +64,7 @@ pub struct StartArgs {
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
 
-    /// Do not transcribe while recording. Live transcription is not yet
-    /// available, so every session records without it.
+    /// Do not transcribe while recording.
     #[arg(long)]
     no_live: bool,
 }
@@ -103,13 +103,12 @@ pub fn start(args: StartArgs, out: Output) -> Result<(), CliError> {
         sources: args.only,
         mic: args.mic,
         system: args.system,
-        // Always off until the library grows live transcription; the flag is
-        // accepted now so a script written against it does not break then.
-        live: false,
+        // Stored here, not only on the command line: the recorder is another
+        // process and reads this file to decide what to capture.
+        live: !args.no_live,
         log: state::log_path(),
         error: None,
     };
-    let _ = args.no_live;
 
     file.create(&session)?;
     let child = match launch::launch(file.path(), &session.session_id, &session.log) {
@@ -141,13 +140,18 @@ pub fn start(args: StartArgs, out: Output) -> Result<(), CliError> {
         println!("recording to {}", r.dir.display());
         println!("  session  {}", r.session_id);
         println!("  recorder pid {}", r.pid);
+        if r.live {
+            println!("  live transcription on");
+        } else {
+            println!("  live transcription off");
+        }
         println!("\n`jotter stop` ends it");
     });
     Ok(())
 }
 
 /// A path another process can open, even when its working directory is `/`.
-fn absolute(path: PathBuf) -> PathBuf {
+pub(crate) fn absolute(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or_else(|_| {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
@@ -245,11 +249,18 @@ pub fn status(out: Output) -> Result<(), CliError> {
             session: None,
             stale: None,
         },
-        Lookup::Active(s) => StatusJson {
-            active: true,
-            session: Some(SessionJson::new(&s)),
-            stale: None,
-        },
+        Lookup::Active(s) => {
+            let live = if s.live {
+                Some(live_report(&s.dir)?)
+            } else {
+                None
+            };
+            StatusJson {
+                active: true,
+                session: Some(SessionJson::new(&s, live)),
+                stale: None,
+            }
+        }
         Lookup::Stale(s) => StatusJson {
             active: false,
             session: None,
@@ -265,6 +276,15 @@ pub fn status(out: Output) -> Result<(), CliError> {
                 s.state, s.started_at, s.elapsed_secs
             );
             println!("  session {} (pid {})", s.session_id, s.pid);
+            if let Some(live) = &s.live {
+                match live.last_end_secs {
+                    Some(end) => println!(
+                        "  live {}, {} segments, last at {end:.1}s",
+                        live.state, live.segments
+                    ),
+                    None => println!("  live {}, {} segments", live.state, live.segments),
+                }
+            }
         }
         (_, Some(s)) => println!(
             "no session running; the last one ({}, pid {}) died without stopping and is stale",
@@ -292,13 +312,25 @@ struct SessionJson {
     started_at: String,
     elapsed_secs: f64,
     state: String,
-    /// Live transcription status. `null` until a session transcribes as it
-    /// records, which none yet does.
-    live: Option<()>,
+    /// Absent when the session was started with `--no-live`. While the file
+    /// is still empty, `state` is `starting` and `segments` is 0: the model
+    /// may still be loading, and a decline is not visible until stop writes
+    /// `meta.json`.
+    live: Option<LiveJson>,
+}
+
+/// What `status` reports about live transcription. Counts come from
+/// `live::read`, not from parsing the file here; `declined` and `failed`
+/// come from `meta.json` when that block exists.
+#[derive(Serialize)]
+struct LiveJson {
+    state: String,
+    segments: u32,
+    last_end_secs: Option<f64>,
 }
 
 impl SessionJson {
-    fn new(s: &SessionState) -> Self {
+    fn new(s: &SessionState, live: Option<LiveJson>) -> Self {
         Self {
             session_id: s.session_id.clone(),
             dir: s.dir.clone(),
@@ -306,9 +338,35 @@ impl SessionJson {
             started_at: s.started_at.clone(),
             elapsed_secs: elapsed(&s.started_at),
             state: s.state.as_str().to_string(),
-            live: None,
+            live,
         }
     }
+}
+
+fn live_report(dir: &Path) -> Result<LiveJson, CliError> {
+    let chunk = jotter::audio::live::read(dir, None)?;
+    let segments = u32::try_from(chunk.segments.len()).unwrap_or(u32::MAX);
+    let last_end_secs = chunk.segments.last().map(|s| s.end);
+    let meta = jotter::audio::meta::Meta::read(&dir.join("meta.json")).ok();
+    let info = meta.as_ref().and_then(|m| m.live.as_ref());
+    // A decline or a failure is only on disk once stop has written meta.json.
+    // Until then an empty file is `starting`, not `running`: nothing has been
+    // transcribed yet, and calling it running would tell a poller that lines
+    // are already flowing.
+    let state = if info.and_then(|l| l.failed.as_ref()).is_some() {
+        "failed"
+    } else if info.and_then(|l| l.declined.as_ref()).is_some() {
+        "declined"
+    } else if segments > 0 {
+        "running"
+    } else {
+        "starting"
+    };
+    Ok(LiveJson {
+        state: state.to_string(),
+        segments,
+        last_end_secs,
+    })
 }
 
 #[derive(Serialize)]
@@ -330,7 +388,7 @@ impl StaleJson {
     }
 }
 
-fn elapsed(started_at: &str) -> f64 {
+pub(crate) fn elapsed(started_at: &str) -> f64 {
     DateTime::parse_from_rfc3339(started_at)
         .map(|t| (Utc::now() - t.with_timezone(&Utc)).num_milliseconds() as f64 / 1_000.0)
         .unwrap_or(0.0)
@@ -376,7 +434,7 @@ pub fn stop(args: StopArgs, out: Output) -> Result<(), CliError> {
     finish_session(&file, &session, args.no_finish, out)
 }
 
-fn no_session() -> CliError {
+pub(crate) fn no_session() -> CliError {
     CliError::new(ErrorKind::NoSession, "no session is recording")
 }
 
@@ -481,4 +539,69 @@ fn finish_session(
     file.remove(&session.session_id)?;
     out.emit(&result, |_| crate::cli::print_recording(&meta, None));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jotter::audio::meta::{LiveInfo, Meta};
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "jotter-status-live-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_empty_live_file_is_starting() {
+        let dir = scratch("empty");
+        let report = live_report(&dir).unwrap();
+        assert_eq!(report.state, "starting");
+        assert_eq!(report.segments, 0);
+        assert!(report.last_end_secs.is_none());
+    }
+
+    #[test]
+    fn segments_make_live_running_and_meta_decline_wins() {
+        let dir = scratch("running");
+        std::fs::write(
+            dir.join(jotter::audio::live::FILENAME),
+            "{\"v\":1,\"track\":\"mic\",\"start\":1.0,\"end\":2.5,\"text\":\"hello\"}\n\
+             {\"v\":1,\"track\":\"system\",\"start\":3.0,\"end\":4.0,\"text\":\"there\"}\n",
+        )
+        .unwrap();
+        let report = live_report(&dir).unwrap();
+        assert_eq!(report.state, "running");
+        assert_eq!(report.segments, 2);
+        assert_eq!(report.last_end_secs, Some(4.0));
+
+        Meta {
+            started_at: 1.0,
+            ended_at: 5.0,
+            mic: None,
+            system: None,
+            aec: None,
+            transcript: None,
+            diarization: None,
+            live: Some(LiveInfo {
+                declined: Some("model_missing".into()),
+                ..LiveInfo::default()
+            }),
+        }
+        .write(&dir.join("meta.json"))
+        .unwrap();
+        let declined = live_report(&dir).unwrap();
+        assert_eq!(declined.state, "declined");
+        assert_eq!(
+            declined.segments, 2,
+            "the lines already written still count"
+        );
+    }
 }

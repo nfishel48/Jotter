@@ -124,6 +124,8 @@ pub enum ErrorKind {
     BundleNotFound,
     /// The recorder process could not be launched at all.
     LaunchFailed,
+    /// The recording directory does not exist, or there is no recording to read.
+    NotFound,
 }
 
 /// A failed command: what kind of failure, and a sentence for a person.
