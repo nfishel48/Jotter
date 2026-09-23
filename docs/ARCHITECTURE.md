@@ -1,53 +1,53 @@
 # Jotter architecture
 
-How the app is put together and how audio data moves through it.
+How Jotter is put together and how audio data moves through it.
 
 For the macOS permission story, the cpal loopback mechanics and the debug
-scripts, see [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md). For exactly what the app
+scripts, see [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md). For exactly what Jotter
 reports and how to turn it off, see [TELEMETRY.md](TELEMETRY.md).
 
 ---
 
 ## The shape of it
 
-Everything lives in the library crate. `src/main.rs` is a thin entry point that
-parses arguments with clap and dispatches: no subcommand opens the tray app,
-`record` and `devices` run the CLI. Both front ends drive the same `audio` API —
-so anything the CLI proves about capture also holds for the app.
+Jotter is a Cargo workspace of two crates. `crates/jotter` is a library that
+holds everything that records and processes audio. `crates/jotter-cli` is the
+`jotter` command: it parses arguments with clap, calls the library, and prints
+what happened. The CLI has no private way into capture, so anything it proves
+about recording also holds for any other program built on the library.
 
 ```mermaid
 graph TB
-    subgraph entry["Entry point"]
-        MAIN["src/main.rs<br/><i>clap dispatch</i>"]
+    subgraph cli["crates/jotter-cli — the jotter command"]
+        MAIN["src/main.rs<br/><i>clap parsing + dispatch</i>"]
+        CLIMOD["src/cli.rs<br/><b>record</b> / <b>devices</b> / <b>process</b> / <b>transcribe</b><br/><b>diarize</b> / <b>models</b> / <b>telemetry</b>"]
+        BENCH["src/bin/bench.rs<br/>jotter-bench <i>(feature bench)</i>"]
     end
 
-    subgraph cli["cli — command line"]
-        CLIMOD["cli.rs<br/><b>record</b> / <b>devices</b> / <b>telemetry</b>"]
+    subgraph lib["crates/jotter — the library"]
+        subgraph audio["audio — capture, platform-agnostic"]
+            AMOD["audio/mod.rs<br/><b>start</b> / <b>stop</b>"]
+            DEV["audio/devices.rs<br/>enumerate + select"]
+            CAP["audio/capture.rs<br/>cpal streams"]
+            WRI["audio/writer.rs<br/>WAV writer thread"]
+            MET["audio/meta.rs<br/>meta.json"]
+        end
+        PIPE["audio/pipeline.rs<br/><b>finish</b>: echo → transcribe → diarize"]
+        STAGES["audio/process.rs · transcribe.rs · diarize.rs<br/>the offline stages"]
+        CFG["config.rs<br/>Settings, recordings_root()"]
+        TEL["telemetry/<br/><i>(feature telemetry)</i>"]
     end
 
-    subgraph ui["ui — presentation, main thread"]
-        UIMOD["ui.rs<br/><b>App</b> state machine"]
-        TRAY["ui/tray.rs<br/>menu + icon events"]
-        SET["ui/settings.rs<br/>egui window"]
-    end
-
-    subgraph audio["audio — capture, platform-agnostic"]
-        AMOD["audio/mod.rs<br/><b>start</b> / <b>stop</b>"]
-        DEV["audio/devices.rs<br/>enumerate + select"]
-        CAP["audio/capture.rs<br/>cpal streams"]
-        WRI["audio/writer.rs<br/>WAV writer thread"]
-        MET["audio/meta.rs<br/>meta.json"]
-    end
-
-    CPAL(["cpal → CoreAudio"])
+    CPAL(["cpal → CoreAudio / PipeWire"])
     DISK[("~/Documents/Jotter/")]
 
-    MAIN --> UIMOD
     MAIN --> CLIMOD
-    UIMOD --> TRAY
-    UIMOD --> SET
-    UIMOD --> AMOD
     CLIMOD --> AMOD
+    CLIMOD --> PIPE
+    CLIMOD --> CFG
+    CLIMOD --> TEL
+    BENCH --> STAGES
+    PIPE --> STAGES
 
     AMOD --> CAP
     AMOD --> MET
@@ -56,29 +56,68 @@ graph TB
     CAP -.opens.-> CPAL
     WRI --> DISK
     MET --> DISK
+    STAGES --> DISK
 
     style audio fill:#1f3a4d,stroke:#4a90b8,color:#fff
-    style ui fill:#3d2f4d,stroke:#9b7fb8,color:#fff
+    style lib fill:#23303a,stroke:#4a90b8,color:#fff
     style cli fill:#4d3d2d,stroke:#b8956f,color:#fff
-    style entry fill:#2d3d2d,stroke:#7fa87f,color:#fff
 ```
 
-The one rule worth preserving: **`audio` knows nothing about `ui` or `cli`.**
-Dependencies point one way, which is why the CLI can exercise the whole capture
-path without starting a GUI.
+The one rule worth preserving: **the library knows nothing about the CLI.**
+Dependencies point one way — `jotter-cli` depends on `jotter`, never the
+reverse — and the library has no clap dependency at all. That is why `cli.rs`
+mirrors `audio::Sources` in its own `ValueEnum` shim instead of deriving on the
+real type, and why a host app that links the library gets no argument parser
+it did not ask for.
 
-The two front ends are cargo features, both on by default:
+---
+
+## Cargo features
+
+Each optional part of the library is a cargo feature, because each drags in a
+stack that has no business in a build that does not use it: `aec` builds
+WebRTC's AudioProcessing from C++ source, `transcribe` links sherpa-onnx and an
+ONNX runtime, and `telemetry` brings an HTTP client and an async runtime.
+Turning one off removes that whole stack from the build rather than merely
+skipping a call.
+
+| Library feature (`jotter`) | Default | Adds |
+| --- | --- | --- |
+| `aec` | on | Echo cancellation: `audio::process`, `audio::aec` |
+| `transcribe` | on | Transcription: `audio::transcribe`, and the model catalogue and downloader in `models` |
+| `diarize` | on | Speaker labels on the system track: `audio::diarize`. Implies `transcribe` |
+| `telemetry` | **off** | Anonymous usage and crash reporting to PostHog |
+
+Telemetry is off by default in the library on purpose. Its events go to
+Jotter's PostHog project under Jotter's name, so a host app that picked it up
+through a plain dependency would be reporting its users into someone else's
+analytics without either side knowing. A host app should leave it off; it is a
+library feature at all only because the `jotter` command is built on the
+library like anything else.
+
+The CLI forwards each of those as a feature of its own and turns all four on:
+
+| CLI feature (`jotter-cli`) | Default | Adds |
+| --- | --- | --- |
+| `aec`, `transcribe`, `diarize`, `telemetry` | on | The library feature of the same name, and the CLI code that drives it |
+| `bench` | off | The `jotter-bench` binary. Implies `transcribe` |
 
 | Build | Command | Contains |
 | --- | --- | --- |
-| Default | `cargo build` | tray app + CLI |
-| CLI only | `cargo build --no-default-features --features cli` | CLI; no eframe/egui/tray-icon |
-| GUI only | `cargo build --no-default-features --features gui` | tray app; no clap |
+| Default | `cargo build` | `target/debug/jotter`, with every stage and telemetry |
+| No telemetry | `cargo build -p jotter-cli --no-default-features --features aec,transcribe,diarize` | Every stage; no telemetry code at all — no HTTP client, no async runtime |
+| Capture only | `cargo build -p jotter-cli --no-default-features` | Two WAV tracks and `meta.json`; no C++ WebRTC build, no ONNX runtime, no network |
+| Benchmarks | `cargo build --release -p jotter-cli --features bench` | Adds `target/release/jotter-bench`, which `benchmarks/` drives |
 
-Each offline pass is a feature too, and for the same reason: `aec` builds
-WebRTC's AudioProcessing from C++ source, and `transcribe` links sherpa-onnx and
-an ONNX runtime. Turning either off removes that whole stack from the build
-rather than merely skipping a call.
+A host app chooses its stages the same way:
+
+```toml
+jotter = { git = "https://github.com/nfishel48/Jotter", default-features = false, features = ["aec", "transcribe"] }
+```
+
+The crate documentation in `crates/jotter/src/lib.rs` walks through the whole
+path for a host app: `audio::start(RecordConfig)` → `RecordingHandle::stop()` →
+`audio::finish` → `audio::transcript::Transcript::read`.
 
 `transcribe` links **statically** — the sherpa-onnx crate's default — so the
 shipped artifact is still one binary with no shared library for a user to be
@@ -87,81 +126,48 @@ target from GitHub releases. `SHERPA_ONNX_LIB_DIR` (a directory of libraries) or
 `SHERPA_ONNX_ARCHIVE_DIR` (a pre-downloaded archive) are the levers if that ever
 has to happen offline.
 
-`audio` is unconditional, so it must never depend on clap or eframe — that is why
-`cli.rs` mirrors `audio::Sources` in its own `ValueEnum` shim instead of deriving
-on the real type.
-
 ---
 
-## Workflow 1 — Startup
+## Workflow 1 — A recording, end to end
+
+`jotter` with no arguments prints help and exits non-zero (clap's
+`arg_required_else_help`); everything happens in a subcommand. `jotter record`
+is the whole life of a recording in one blocking call:
 
 ```mermaid
 sequenceDiagram
-    participant OS as macOS
-    participant M as main.rs
-    participant R as ui::run
-    participant A as App
-    participant T as tray
+    participant U as User
+    participant C as jotter record
+    participant S as config
+    participant A as audio
+    participant F as audio::finish
 
-    OS->>M: launch (from Jotter.app)
-    M->>R: run(options)
-    R->>T: build_tray(load_icon())
-    Note right of T: assets/icon.png is include_bytes!'d —<br/>no runtime path to guess, which is what<br/>broke the tray on a Linux install
-
-    T-->>R: Tray { _icon, record_item }
-    R->>A: App::new(tray)
-    A->>A: refresh_devices()
-    Note right of A: cached, not per-frame:<br/>enumeration walks CoreAudio<br/>and copies strings over FFI
-    A-->>OS: window shown, tray live
+    U->>C: jotter record [--duration N]
+    C->>S: Settings::load()
+    Note right of S: settings.json, overridden per run by<br/>--aec / --transcribe / --diarize<br/>and their --no- forms
+    C->>C: dir = --out, else<br/>recordings_root()/<timestamp>
+    C->>A: start(RecordConfig)
+    A-->>C: RecordingHandle
+    Note over C: until --duration elapses,<br/>or Enter is pressed
+    C->>A: handle.stop()
+    A-->>C: Meta (meta.json written)
+    C->>C: print per-track summary
+    C->>F: finish(dir, FinishOptions)
+    F-->>C: FinishReport
+    C->>C: print each stage's outcome
 ```
+
+The default directory comes from `jotter::config::recordings_root()` —
+`~/Documents/Jotter`, or under an absolute `XDG_DOCUMENTS_DIR` on Linux. It is
+absolute because on macOS the recorder runs inside `Jotter.app`, whose working
+directory is `/`; and it is in the library so a host app that wants its
+recordings beside Jotter's finds the same folder without re-deriving it.
 
 ---
 
-## Workflow 2 — The event loop
+## Workflow 2 — Starting a recording
 
-eframe 0.36 splits the loop in two, and the split matters here: **while the
-window is hidden, eframe runs no egui pass at all** and calls `logic` instead of
-`ui`. Since the window spends most of its life hidden, tray polling has to live
-in `logic` — in `ui` the menu would be dead exactly when it is the user's only
-interface.
-
-`logic` only runs when a repaint is pending, so it re-arms itself.
-
-```mermaid
-flowchart TB
-    START([eframe frame]) --> LOGIC["App::logic"]
-    LOGIC --> PUMP["pump_tray(ctx)"]
-
-    PUMP --> ICON{"handle_icon_events()"}
-    ICON -->|left click| SHOW["show_window()"]
-    PUMP --> MENU{"handle_menu_events()"}
-
-    MENU -->|ToggleRecord| TOG["toggle_recording()"]
-    MENU -->|ShowSettings| SHOW
-    MENU -->|Quit| Q["stop_recording()<br/>then exit(0)"]
-
-    LOGIC --> ARM["request_repaint_after<br/>200ms recording / 500ms idle"]
-    ARM -.keeps loop alive.-> START
-
-    ARM --> VIS{"window visible?"}
-    VIS -->|no| START
-    VIS -->|yes| UI["App::ui → settings::draw"]
-    UI --> ACT{"Action?"}
-    ACT -->|Toggle| TOG
-    ACT -->|RefreshDevices| RD["refresh_devices()"]
-    ACT -->|Reveal| RV["reveal_in_finder()"]
-    UI --> CLOSE{"close requested?"}
-    CLOSE -->|yes| HIDE["CancelClose + Visible(false)<br/><i>hide, don't quit —<br/>recording survives</i>"]
-
-    style Q fill:#4d2f2f,stroke:#b87f7f,color:#fff
-    style ARM fill:#1f3a4d,stroke:#4a90b8,color:#fff
-```
-
----
-
-## Workflow 3 — Starting a recording
-
-Both entry points converge on `audio::start`. The mic and system paths are
+Every recording, from the CLI or a host app, goes through `audio::start`. The mic and system paths are
 deliberately **separate functions** rather than one parameterised helper: they
 differ in which config accessor applies and in which failures matter, and
 collapsing them is what makes the loopback footgun easy to trip.
@@ -170,15 +176,15 @@ collapsing them is what makes the loopback footgun easy to trip.
 sequenceDiagram
     autonumber
     participant U as User
-    participant App as ui::App
+    participant App as jotter record
     participant S as audio::start
     participant C as capture
     participant D as devices
     participant W as TrackWriter
     participant CP as cpal
 
-    U->>App: Start Recording
-    App->>App: dir = recordings_root()/<br/>recording_dir_name()
+    U->>App: jotter record
+    App->>App: dir = --out, or recordings_root()/<br/>timestamp_dir_name()
     App->>S: start(RecordConfig)
     S->>S: create_dir_all(out_dir)
     Note right of S: first run prompts for<br/>Documents access (TCC)
@@ -209,12 +215,12 @@ sequenceDiagram
     S->>CP: stream.play() ×2
     Note right of CP: cpal 0.17 stopped auto-starting.<br/>0.18 is play()/pause(), not start()
     S-->>App: RecordingHandle
-    App->>App: status = Recording<br/>tray.set_recording(true)
+    App->>App: print "recording to <dir>"
 ```
 
 ---
 
-## Workflow 4 — The audio hot path
+## Workflow 3 — The audio hot path
 
 This is the part with real constraints. The cpal callback runs on a **realtime
 audio thread**; blocking it on file I/O causes dropouts. So the callback does
@@ -261,7 +267,7 @@ Why each step is the way it is:
 
 ---
 
-## Workflow 5 — Stopping
+## Workflow 4 — Stopping
 
 Ordering matters. Pause before tearing down writers so no callback races the
 channel close, and finalize before the process exits.
@@ -270,13 +276,13 @@ channel close, and finalize before the process exits.
 sequenceDiagram
     autonumber
     participant U as User
-    participant App as ui::App
+    participant App as jotter record
     participant H as RecordingHandle::stop
     participant W as TrackWriter::finish
     participant WT as writer thread
     participant M as meta
 
-    U->>App: Stop / Quit / Cmd-Q
+    U->>App: Enter, or --duration elapses
     App->>H: handle.stop()
     H->>H: stream.pause(); drop(stream)
     Note right of H: pause first — a live callback<br/>racing the channel close
@@ -290,13 +296,59 @@ sequenceDiagram
     H->>M: Meta { started, ended, mic, system }
     M->>M: write(meta.json)
     H-->>App: Meta
-    App->>App: status = Finished
+    App->>App: print track summary
 ```
 
-**Every exit path finalizes.** Tray Quit calls `stop_recording` before
-`exit(0)`; `App::on_exit` catches Cmd-Q and normal shutdown. Without both, a
-crash-out mid-meeting leaves an unreadable WAV and you find out at transcription
-time.
+**Every exit path has to go through `stop()`.** `jotter record` has exactly one
+way out of a recording, and it is this one. A host app takes on the same
+obligation: its quit path must stop a live recording before the process ends.
+Without that, a crash-out mid-meeting leaves an unreadable WAV and you find out
+at transcription time.
+
+---
+
+## Workflow 5 — Finishing: `audio::finish`
+
+What happens to a recording once it is on disk is one function,
+`jotter::audio::finish(dir, &FinishOptions) -> FinishReport`, in
+`audio/pipeline.rs`, and nothing else reimplements the chain. `jotter record`
+uses it, and so does any host app. `finish_with_progress` is the same pipeline
+with a `|stage, fraction|` callback, for a caller that wants to show how far
+along each stage is.
+
+```mermaid
+flowchart TB
+    S[stop returns Meta] --> A{aec on and<br/>both tracks<br/>captured audio?}
+    A -- no --> AS[aec: Skipped]
+    A -- yes --> AR[echo cancellation<br/>Workflow 6]
+    AR --> AO[aec: Ran / Failed]
+    AS --> T{transcribe on and<br/>some track<br/>has audio?}
+    AO --> T
+    T -- no --> TS[transcribe: Skipped]
+    T -- yes --> TR[transcription<br/>Workflow 7]
+    TR --> TO[transcribe: Ran / Failed]
+    TS --> D{diarize on and<br/>a transcript<br/>now exists?}
+    TO --> D
+    D -- no --> DS[diarize: Skipped]
+    D -- yes --> DR[diarization<br/>Workflow 8]
+    DR --> DO[diarize: Ran / Failed]
+    DS --> R[FinishReport]
+    DO --> R
+
+    style R fill:#e8ffe8
+```
+
+Each stage's outcome is a `StageOutcome`: `Skipped(Skip)`, `Ran(report)` or
+`Failed(error)`, where `Skip` is `Disabled`, `NoAudio` or `NoTranscript`.
+
+| Rule | Reason |
+| --- | --- |
+| This order, always | Each stage reads what the one before it wrote. Transcription takes the mic track from `Meta::preferred_mic_path`, which is not decided until echo cancellation has recorded its verdict; diarization labels the segments transcription wrote. |
+| Failures in the report, never `Err` | The recording on disk is the result. A stage that fails comes back as `Failed(error)` in its field of the report, and `jotter process`, `jotter transcribe` or `jotter diarize <dir>` can redo it later. Returning `Err` would let a caller's `?` turn a good recording into a failed one. |
+| Skips say why | "You turned it off", "there was no audio" and "there was no transcript to label" are different answers, and a missing file cannot tell them apart. |
+| Gates read what is on disk | Diarization asks whether a transcript *now* exists rather than whether transcription was enabled, because a transcript is what it labels. Echo cancellation and transcription likewise ask about the audio that was actually captured, not what was requested. |
+| One report field per compiled-in stage | `FinishReport` has an `aec`, `transcribe` or `diarize` field only in builds with that feature, so a capture-only build cannot even name a stage it does not have. `transcript_path()` says where the transcript is, when there is one. |
+| Options are plain data | `FinishOptions { aec, transcribe, diarize, speakers: Option<u8> }`. `FinishOptions::from_settings(&Settings)` builds it from `settings.json`; `jotter record` then applies its per-run flags on top. A host app can use either. |
 
 ---
 
@@ -307,9 +359,9 @@ mic track is never modified; the result is a second file beside it.
 
 ```mermaid
 flowchart TB
-    S[stop returns Meta] --> G{aec_enabled<br/>and both tracks<br/>have audio?}
-    G -- no --> F[Status::Finished]
-    G -- yes --> T[spawn worker thread<br/>Status::Processing]
+    S[audio::finish] --> G{options.aec<br/>and both tracks<br/>captured audio?}
+    G -- no --> F[next stage]
+    G -- yes --> T[process::run]
     T --> A{check_alignable<br/>from meta.json alone}
     A -- "lengths differ > 250ms<br/>rates differ / empty track" --> B[record aec.bypassed<br/>write no audio]
     A -- ok --> C[classify activity<br/>100ms RMS frames]
@@ -320,8 +372,7 @@ flowchart TB
     P2 --> W[mic_aec.wav.tmp<br/>then rename]
     W --> M[rewrite meta.json<br/>with erle and near_gain]
     B --> M
-    M --> R[send to egui thread]
-    R --> F
+    M --> F
 
     style T fill:#e8f4ff
     style B fill:#ffe8e8
@@ -333,12 +384,11 @@ flowchart TB
 | Step | Reason |
 | --- | --- |
 | Offline, not in the callback | The two cpal streams never see each other, and the realtime callback must not allocate. Offline also means recordings made before this existed can be cleaned. |
-| On a worker thread | `stop()` is called from the egui thread. A pass takes tens of seconds on a long meeting, and blocking there freezes the window *and* the tray. |
-| Drained in `logic`, not `ui` | A tray app spends most of its life with the window hidden. A result that only landed when someone opened the window would leave the pane stale. |
+| Its own stage, called by `finish` | `jotter process <dir>` runs exactly this pass on an existing recording; `jotter record` and a host app reach it through `audio::finish`. One implementation, three entry points, so a recording cleaned later is cleaned the same way. |
 | `check_alignable` first | Every check in it is answerable from `meta.json`, so a hopeless recording costs no I/O at all. |
 | Tracks fed unaligned | AEC3 estimates the delay itself. Pre-shifting by our own measurement risks an alignment slightly *too large*, which asks the filter to model an echo arriving before its cause — inexpressible, and unrecoverable. |
 | Two passes | The first second or two of a cold filter is uncancelled, and in a meeting that is the greeting. Worth 5 dB on echo-only passages. |
-| tmp + rename | The tray's Quit calls `process::exit(0)`. A pass killed mid-write would otherwise leave a truncated file whose RIFF header claims it is complete. |
+| tmp + rename | A pass killed mid-write — Ctrl-C, a closed terminal, a host app quitting — would otherwise leave a truncated file whose RIFF header claims it is complete. |
 | Bypass reasons in `meta.json` | A pass must be able to say "I decided not to, and here is why". No file and no explanation is indistinguishable from a crash. |
 | The mechanics in `audio/stage.rs`, ungated | Everything above except the cancelling itself is what *any* pass does — read the directory, write one artifact, record the outcome — and transcription is next. Each pass sits behind its own cargo feature, so the shared part is behind none of them: a transcriber must not have to build the WebRTC C++ stack to reuse a rename. |
 
@@ -353,8 +403,8 @@ timeline — the payoff for having captured them separately in the first place.
 
 ```mermaid
 flowchart TB
-    S[echo pass done] --> G{transcribe_enabled<br/>and any track<br/>has audio?}
-    G -- no --> F[Status::Finished]
+    S[echo stage done] --> G{options.transcribe<br/>and any track<br/>has audio?}
+    G -- no --> F[next stage]
     G -- yes --> M{model + VAD<br/>on disk?}
     M -- no --> D["record transcript.declined<br/>= model_missing"]
     M -- yes --> L[load recogniser + VAD once<br/>reused across both tracks]
@@ -413,8 +463,8 @@ fills in the `speaker` field `transcript.json` reserved in v1.
 
 ```mermaid
 flowchart TB
-    S[transcription done] --> G{diarize_enabled<br/>and a transcript<br/>exists?}
-    G -- no --> F[Status::Finished]
+    S[transcription done] --> G{options.diarize<br/>and a transcript<br/>exists?}
+    G -- no --> F[FinishReport]
     G -- yes --> N{speaker count<br/>set?}
     N -- no --> D["record diarization.declined<br/>= no_speaker_count"]
     N -- yes --> M{both models<br/>on disk?}
@@ -450,43 +500,6 @@ flowchart TB
 | Unmatched segments keep no label | The field is omitted while unset precisely so an unattributed segment can say so. A nearest-turn guess would be unfalsifiable. |
 | The whole waveform is resident | `OfflineSpeakerDiarizationProcess` takes one slice and offers no streaming form. An hour at 16 kHz is ~230 MB of `f32`; the `i16` track is dropped first so the two peaks do not add. Not a choice this stage gets to make. |
 | No progress during the model run | The C API has a callback form; the Rust binding at 1.13 does not expose it. Progress covers the decode and resample and then stops, which is honest about what is measurable. |
-
----
-
-## Recording state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Recording: toggle_recording()<br/>audio::start ok
-    Idle --> Error: start failed<br/>(duplex / permission / io)
-    Recording --> Processing: stop() ok<br/>and a pass is enabled
-    Recording --> Finished: stop() ok
-    Recording --> Error: stop() failed
-    Processing --> Processing: echo pass done,<br/>transcription starts
-    Processing --> Finished: last pass done<br/>(applied or declined)
-    Processing --> Error: pass failed
-    Error --> Recording: retry
-    Finished --> Recording: start again
-
-    note right of Recording
-        Device pickers are locked.
-        A device cannot change
-        underneath a live stream.
-    end note
-
-    note right of Processing
-        The audio is already on disk.
-        Nothing is at risk if the app
-        is quit here.
-    end note
-
-    note right of Finished
-        A zero-frame track is flagged
-        red — otherwise it is
-        indistinguishable from success.
-    end note
-```
 
 ---
 
@@ -548,7 +561,7 @@ just because it produced a file.
 why the accessors take that directory and hand back a resolved path. The folder
 is the unit that gets moved, copied and archived, so anything reaching outside
 it stops resolving the moment it is. `meta.json` files written before this was
-settled hold an absolute path from the GUI or a cwd-relative one from the CLI;
+settled hold an absolute path or a cwd-relative one;
 `TrackInfo::resolve` takes the file name from those and resolves it against the
 directory the file was actually found in.
 
@@ -571,14 +584,12 @@ explicitly rather than trusting the happy path.
 | --- | --- | --- |
 | `system.wav` is all digital zeros | No system-audio permission. macOS runs the tap and feeds it silence rather than failing. | Flagged by `analyze_wav.py`; requires running from the bundle |
 | `system.wav` contains the **microphone** | Loopback opened on a duplex device — cpal's tap branch only triggers when `supports_input()` is false | `open_loopback` refuses duplex outright (`CaptureError::DuplexSystemDevice`) |
-| Zero frames captured | Output device was idle — a tap produces no callbacks when nothing is playing | Flagged in the settings pane and CLI output |
-| Truncated / unopenable WAV | Process exited without `finalize()` | `on_exit` + tray Quit both stop first |
-| Tray menu unresponsive | Polling put in `ui` instead of `logic` | `logic` polls and re-arms its own repaint |
-| Writes to `/recordings` | Relative path from a bundle, whose cwd is `/` | `recordings_root()` is absolute |
+| Zero frames captured | Output device was idle — a tap produces no callbacks when nothing is playing | Flagged in the `jotter record` track summary |
+| Truncated / unopenable WAV | Process exited without `finalize()` | `jotter record` only leaves a recording through `RecordingHandle::stop`; a host app must do the same on its quit path |
+| Writes to `/recordings` | Relative path from a bundle, whose cwd is `/` | `config::recordings_root()` is absolute, and is `jotter record`'s default |
 | `mic_aec.wav` sounds *worse* than `mic.wav` | A misaligned far-end reference adds uncorrelated energy instead of removing echo. Happens when the two tracks cannot be aligned at all — an idle macOS tap, or drifting clocks | `process::check_alignable` and the drift guard bypass rather than guess; the reason lands in `meta.json` as `aec.bypassed` |
 | Echo removal looks like it ate the speaker's voice | Frames were classified near-only while the echo tail was still decaying, so correctly removing it counted as damage | 200 ms far-end hangover in `process::classify` |
-| The window freezes for seconds after Stop | The pass ran on the egui thread | `App::start_processing` spawns it; `poll_processing` drains in `logic` |
-| Transcription never runs, or every recording records `model_missing` | The speech model was never downloaded. Transcription is the one pass that cannot work on a fresh install, which is why `transcribe_enabled` defaults off | `jotter models pull`; the settings pane says so before the box is ticked, and the decline names the command |
+| Transcription never runs, or every recording records `model_missing` | The speech model was never downloaded. Transcription is the one pass that cannot work on a fresh install, which is why `transcribe_enabled` defaults off | `jotter models pull`; the decline names the command |
 | The transcript reads as two interleaved monologues, replies before remarks | System timestamps used raw instead of shifted onto the mic timeline — the two cpal streams start at different instants | `transcript::Segment::shifted`, applied in `transcribe::run` from `Meta::track_offset_secs` |
 | Transcription finds no speech in an obviously non-silent track | Audio fed to Silero VAD at the wrong rate. It is a 16 kHz model and our tracks are 48 kHz | Both tracks go through `LinearResampler` once before the detector *or* the recogniser sees them |
 | A transcript that reads like a stutter, one fragment per breath | The voice-activity pass cutting at every short pause, which also costs the recogniser its context | `MIN_SILENCE_SECS` — half a second is a turn boundary, less is someone thinking |
@@ -587,9 +598,13 @@ explicitly rather than trusting the happy path.
 
 ## Module reference
 
+Library, `crates/jotter/src/`:
+
 | Module | Owns |
 | --- | --- |
+| `lib.rs` | The crate documentation: record → finish → read transcript, for a host app |
 | `audio/mod.rs` | `RecordConfig`, `Sources`, `RecordingHandle`; `start` / `stop` orchestration |
+| `audio/pipeline.rs` | `finish` / `finish_with_progress`, `FinishOptions`, `FinishReport`, `FinishStage`, `StageOutcome`, `Skip` — the one copy of the post-recording chain. Private module, re-exported from `audio` |
 | `audio/devices.rs` | Enumeration, direction classification, `can_loopback()`, default selection |
 | `audio/capture.rs` | `open_mic` / `open_loopback`, the duplex guard, `CaptureError` and its per-platform access hints |
 | `audio/writer.rs` | `TrackWriter` / `TrackSink`, the realtime→writer boundary, format conversion |
@@ -603,51 +618,59 @@ explicitly rather than trusting the happy path.
 | `audio/diarize.rs` | The diarization stage: pyannote segmentation plus speaker embeddings over the system track, the `Diarizer` seam, and the overlap rule that turns speaker turns into labels on existing segments (feature `diarize`) |
 | `models.rs` | The speech-model catalogue, where models live on disk, and `resolve` (feature `transcribe`) |
 | `models/fetch.rs` | The verified downloader behind `jotter models pull`. The only code here that opens a socket for a reason other than telemetry |
-| `main.rs` | clap parsing and the GUI/CLI dispatch |
-| `cli.rs` | `record` / `devices` / `telemetry` subcommands and their console output |
-| `ui.rs` | `App`, the recording state machine, tray pumping, paths, `run()` |
-| `ui/tray.rs` | `Tray`, `MenuAction`, event draining |
-| `ui/settings.rs` | egui window, device pickers, status rendering, the privacy section |
-| `config.rs` | `Settings` — the only persisted preferences, and the telemetry opt-out |
+| `config.rs` | `Settings` — the only persisted preferences, and the telemetry opt-out — and `recordings_root()` |
 | `telemetry/mod.rs` | The `Telemetry` handle, and its no-op twin for builds without the feature |
 | `telemetry/worker.rs` | The one thread that does network I/O; PostHog client lifecycle |
 | `telemetry/events.rs` | Every event name, and the `Meta` → properties allowlist |
 | `telemetry/scrub.rs` | Home-directory redaction for payloads Jotter does not build itself |
 
+CLI, `crates/jotter-cli/src/`:
+
+| Module | Owns |
+| --- | --- |
+| `main.rs` | The `jotter` binary: clap parsing and dispatch |
+| `cli.rs` | Every subcommand, its flags, and its console output; the `ValueEnum` mirrors of library types |
+| `bin/bench.rs` | `jotter-bench`, the benchmark driver (feature `bench`) |
+
 ## Telemetry
 
-Anonymous usage and crash reporting via PostHog, behind the default-on
-`telemetry` feature. `docs/TELEMETRY.md` is the user-facing contract and lists
-every event; the notes here are the ones that constrain the code.
+Anonymous usage and crash reporting via PostHog, behind the `telemetry`
+feature — on in the CLI's defaults, off in the library's, for the reason under
+[Cargo features](#cargo-features). `docs/TELEMETRY.md` is the user-facing
+contract and lists every event; the notes here are the ones that constrain the
+code.
 
 Three properties the implementation is built to preserve:
 
-1. **`audio` still knows nothing about anything else.** The only change there is
+1. **`audio` still knows nothing about telemetry.** The only change there is
    `CaptureError::kind()`, a method on an existing enum. Instrumentation lives in
-   the front ends.
+   the CLI, which reads the reports the library already returns.
 2. **Nothing identifying can be sent by accident.** `Telemetry::track` takes
    `&'static str` property values, so a device name or a path cannot reach it
    without someone going well out of their way. `CaptureError`'s `Display` names
    the device — that is what it is for — which is exactly why `kind()` exists.
-3. **Off means off.** The PostHog client is constructed lazily, on the first
-   transition to enabled. Opted out, there is no client, no flag polling, and no
-   socket. Jotter has no other use for the network.
+3. **Off means off.** When telemetry is off — the stored setting,
+   `DO_NOT_TRACK=1`, or `JOTTER_TELEMETRY=0` — no telemetry thread is started,
+   no PostHog client is built, and no install id is minted. No feature flags are
+   evaluated either way. Jotter's only other use of the network is
+   `jotter models pull`, which is a deliberate act.
 
 Three things that are easy to get wrong here:
 
-- **Every exit path must drain explicitly.** The tray's Quit calls
-  `process::exit`, which runs no destructors, so `Drop` is not a mechanism. See
-  `App::finish_session`.
+- **Every exit path must drain explicitly.** `process::exit` runs no
+  destructors, so `Drop` is not a mechanism; whatever ends the process calls
+  `Telemetry::shutdown` first.
 - **The realtime audio callback is never instrumented.** Allocating or locking on
   that thread causes dropouts. `TrackInfo::stream_errors` is already an atomic
   counter; it is reported at `stop`.
 - **`init_global` must come before any network call in `worker::start`.** It is
-  what installs the panic hook, and every panic in this app is in tray
-  construction, milliseconds after launch. An earlier version evaluated feature
-  flags first, putting a full HTTP round trip in front of the hook; a forced
-  panic at `ui/tray.rs:104` was then lost entirely, and captured once the order
-  was flipped. Both states were confirmed against a live project, so this is a
-  measurement rather than a theory. Flag evaluation is deliberately second.
+  what installs the panic hook, and a panic milliseconds after launch is exactly
+  the kind worth catching. An earlier version evaluated feature flags first,
+  putting a full HTTP round trip in front of the hook; a forced panic during
+  startup was then lost entirely, and captured once the order was flipped. Both
+  states were confirmed against a live project, so this is a measurement rather
+  than a theory. Flags are no longer evaluated at all, but anything added to
+  worker startup belongs after the hook, not before it.
 
 macOS builds are ad-hoc codesigned with no App Sandbox, so outbound HTTPS needs
 no entitlement and no ATS exception. Mac App Store distribution would later

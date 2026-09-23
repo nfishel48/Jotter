@@ -79,10 +79,10 @@ mod tests {
         let value = json!({
             "$exception_list": [{
                 "type": "panic",
-                "value": "failed to open icon path: /Users/nfishel/assets/icon.png",
+                "value": "failed to open recording: /Users/nfishel/Documents/Jotter/meta.json",
                 "stacktrace": {
                     "frames": [
-                        { "filename": "/Users/nfishel/jotter/src/ui/tray.rs", "lineno": 90 },
+                        { "filename": "/Users/nfishel/jotter/crates/jotter/src/audio/capture.rs", "lineno": 90 },
                         { "filename": "/rustc/deadbeef/library/std/src/panic.rs", "lineno": 1 }
                     ]
                 }
@@ -92,7 +92,7 @@ mod tests {
         let out = redacted(&value, "/Users/nfishel").unwrap();
         let rendered = out.to_string();
         assert!(!rendered.contains("nfishel"), "home survived: {rendered}");
-        assert!(rendered.contains("~/jotter/src/ui/tray.rs"));
+        assert!(rendered.contains("~/jotter/crates/jotter/src/audio/capture.rs"));
         // Non-home paths are untouched: they carry no identity and the frames
         // are useless without them.
         assert!(rendered.contains("/rustc/deadbeef/library/std/src/panic.rs"));

@@ -2,7 +2,7 @@
 ## jotter is a fully local recording, transcription, and semantic search tool
 
 ### jotter is still in early development but thr roadmap is as follows
-- Start/stop recording from a menu bar or floating window.   
+- Start/stop recording from the terminal, or from any app that links the library.   
 -  Meeting appears as a transcript with speakers and times.    
 -  Search box: “refund policy”, “what Jane said about pricing”.   
 -  Results show snippet + meeting + timestamp; click plays that moment.   
@@ -27,11 +27,11 @@ Default model is NVIDIA Parakeet TDT 0.6b v2 (English), run through [sherpa-onnx
 Then either transcribe an existing recording:
 
 ```bash
-jotter transcribe recordings/2026-09-15_14-32-08
+jotter transcribe ~/Documents/Jotter/2026-09-15_14-32-08
 ```
 
-or have every recording transcribed as it finishes tick **Transcribe
-recordings when they finish** in the settings pane, or for a single run:
+or have every recording transcribed as it finishes by setting
+`"transcribe_enabled": true` in `settings.json` (see below), or for a single run:
 
 ```bash
 jotter record --transcribe --duration 600
@@ -52,7 +52,7 @@ point of recording two files. Telling apart the several people inside the
 `system` track is a second pass:
 
 ```bash
-jotter diarize recordings/2026-09-15_14-32-08 --speakers 4
+jotter diarize ~/Documents/Jotter/2026-09-15_14-32-08 --speakers 4
 ```
 
 That fills in a `speaker` on each system segment, in place, without
@@ -71,11 +71,51 @@ count them instead, and it is not reliable enough to ship: on a clean recording
 it is right, and on a thirty-six minute meeting of three people who talked over
 each other it reported two hundred and eight speakers. A transcript that
 confidently names two hundred and eight people is worse than one that names
-none, so the number comes from you. Set it once in the settings pane, or pass
-`--speakers` per run.
+none, so the number comes from you. Set it once as `diarize_speakers` in
+`settings.json`, or pass `--speakers` per run.
 
-Speaker identification is off by default and needs two more models (~44 MB),
-fetched by the same `jotter models pull`.
+Speaker identification is off by default (`diarize_enabled`, or `--diarize` for
+one run) and needs two more models (~44 MB), fetched by the same `jotter models pull`.
+
+## Settings
+
+There is no settings window: Jotter is a command-line tool, and the few
+preferences it keeps live in one JSON file.
+
+- macOS — `~/Library/Application Support/Jotter/settings.json`
+- Linux — `${XDG_CONFIG_HOME:-~/.config}/jotter/settings.json`
+
+`jotter telemetry` prints the exact path.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `aec_enabled` | `true` | Remove speaker echo from your mic track when a recording stops |
+| `transcribe_enabled` | `false` | Transcribe every recording when it stops |
+| `diarize_enabled` | `false` | Label the people in the system track after transcribing |
+| `diarize_speakers` | `0` (not set) | How many people were on the call |
+| `telemetry_enabled` | `true` | Anonymous usage and crash reports — see [docs/TELEMETRY.md](docs/TELEMETRY.md) |
+
+Any of the first three can be overridden for a single `jotter record` with
+`--aec`/`--no-aec`, `--transcribe`/`--no-transcribe` and
+`--diarize`/`--no-diarize`. Recordings go to `~/Documents/Jotter/<timestamp>/`
+unless you pass `--out`.
+
+## Using Jotter as a library
+
+Everything the `jotter` command does lives in the `jotter` library crate
+(`crates/jotter`); the CLI in `crates/jotter-cli` is a thin layer over it. Another
+Rust program can record, finish and read a transcript through the same code:
+
+```toml
+jotter = { git = "https://github.com/nfishel48/Jotter", default-features = false, features = ["aec", "transcribe"] }
+```
+
+Each processing stage is a cargo feature — `aec`, `transcribe`, `diarize` — so
+an app pays only for the ones it uses. Telemetry is off in the library unless a
+build asks for it, and a host app should leave it that way: it would report into
+Jotter's own PostHog project, as Jotter. The crate documentation at the top of
+[`crates/jotter/src/lib.rs`](crates/jotter/src/lib.rs) walks through record →
+finish → read transcript.
 
 ## How accurate is it?
 
@@ -86,7 +126,7 @@ beside anyone else's:
 
 ```bash
 benchmarks/bootstrap.sh
-cargo build --release --features bench
+cargo build --release -p jotter-cli --features bench
 benchmarks/bench score --corpus librispeech-test-clean
 ```
 

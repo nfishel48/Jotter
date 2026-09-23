@@ -36,18 +36,17 @@ mod worker;
 /// module docs for why the values are constrained in practice too.
 pub type Prop = (&'static str, serde_json::Value);
 
-/// Which front end is running. Present on every event, because the tray app and
-/// the CLI have almost nothing in common operationally.
+/// Which front end is running. Present on every event, so that a new front end
+/// arrives as a new value in an existing column rather than as traffic that
+/// cannot be told apart from the command line's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    Gui,
     Cli,
 }
 
 impl Surface {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Gui => "gui",
             Self::Cli => "cli",
         }
     }
@@ -68,15 +67,12 @@ mod real {
     use crate::config::Settings;
 
     /// Cheap to clone — all clones share one worker.
-    ///
-    /// Needed because `eframe::run_native` takes ownership of the closure that
-    /// builds the app, so a handle has to be kept behind for the "the window
-    /// never opened" case.
     #[derive(Clone)]
     pub struct Telemetry {
-        /// `None` when there is no API key, which is the default for any build
-        /// that is not an official release — a fork or a `cargo build` sends
-        /// nothing, with no configuration required.
+        /// `None` when nothing will be sent: no API key, which is the default
+        /// for any build that is not an official release — a fork or a `cargo
+        /// build` sends nothing, with no configuration required — or
+        /// telemetry turned off by the user or the environment.
         inner: Option<Arc<Inner>>,
     }
 
@@ -94,16 +90,22 @@ mod real {
     }
 
     impl Telemetry {
-        /// Start the telemetry worker.
+        /// Start the telemetry worker, if telemetry is allowed at all.
         ///
-        /// Mints and persists `install_id` if absent, so that opting in later in
-        /// the session works without a restart. The id is a random v4 UUID: it
-        /// identifies an installation, is derived from nothing about the machine
-        /// or the person, and never leaves the disk while telemetry is off.
+        /// Off means off from the first instruction: no thread, no client, and
+        /// no install id minted. The choice is fixed for the life of the
+        /// handle — a front end is a short-lived process that reads the setting
+        /// afresh on its next run, so there is no mid-session opt-out to
+        /// honour. When it is on, the id is a random v4 UUID: it identifies an
+        /// installation, and is derived from nothing about the machine or the
+        /// person.
         pub fn init(surface: Surface, settings: &mut Settings) -> Self {
             let Some(api_key) = api_key() else {
                 return Self { inner: None };
             };
+            if !settings.telemetry_allowed() {
+                return Self { inner: None };
+            }
 
             if settings.install_id.is_none() {
                 settings.install_id = Some(uuid::Uuid::new_v4().to_string());
@@ -115,14 +117,10 @@ mod real {
                 return Self { inner: None };
             };
 
-            let enabled = settings.telemetry_allowed();
             let state = Arc::new(State {
                 api_key,
                 distinct_id,
                 surface,
-                enabled: AtomicBool::new(enabled),
-                sending: AtomicBool::new(enabled),
-                flags: Default::default(),
                 home: super::scrub::home(),
             });
 
@@ -145,8 +143,9 @@ mod real {
                 shutdown_sent: AtomicBool::new(false),
             });
 
-            // Drives first-time client construction when already opted in.
-            let _ = inner.tx.send(Cmd::SetEnabled(enabled));
+            // Client construction happens on the worker, so the network never
+            // sits between the caller and its first line of output.
+            let _ = inner.tx.send(Cmd::Start);
 
             Self { inner: Some(inner) }
         }
@@ -154,9 +153,6 @@ mod real {
         /// Queue an event. Never blocks; drops silently if the worker is gone.
         pub fn track(&self, name: &'static str, props: &[Prop]) {
             let Some(inner) = &self.inner else { return };
-            if !inner.state.enabled.load(Ordering::Relaxed) {
-                return;
-            }
 
             let mut all = inner.context.clone();
             all.extend(props.iter().cloned());
@@ -176,9 +172,6 @@ mod real {
             props: &[Prop],
         ) {
             let Some(inner) = &self.inner else { return };
-            if !inner.state.enabled.load(Ordering::Relaxed) {
-                return;
-            }
 
             let mut all = inner.context.clone();
             all.extend(props.iter().cloned());
@@ -189,51 +182,21 @@ mod real {
             });
         }
 
-        /// Turn collection on or off for the rest of the session.
+        /// Whether anything will be sent from this handle.
         ///
-        /// The caller is responsible for persisting the choice; this only moves
-        /// the runtime switch.
-        pub fn set_enabled(&self, on: bool) {
-            let Some(inner) = &self.inner else { return };
-            // Store eagerly so `track` starts dropping immediately, rather than
-            // whenever the worker gets round to the message.
-            inner.state.enabled.store(on, Ordering::Relaxed);
-            let _ = inner.tx.send(Cmd::SetEnabled(on));
-        }
-
-        /// Whether this build is capable of collecting anything.
-        ///
-        /// Deliberately independent of whether it currently *is*: the settings
-        /// checkbox is drawn from this, and keying it on the live state would
-        /// disable the control the moment someone opted out, leaving them no way
-        /// back in. False means no `telemetry` feature or no API key.
-        pub fn is_configured(&self) -> bool {
+        /// False with no API key or with telemetry turned off, and always false
+        /// without the `telemetry` feature. The first-run notice is keyed on
+        /// this, so it appears exactly when there is something to give notice
+        /// of.
+        pub fn is_active(&self) -> bool {
             self.inner.is_some()
-        }
-
-        /// Read a feature flag evaluated at startup.
-        ///
-        /// Remote evaluation only — a flag the app has never heard back about is
-        /// `false`. Local evaluation would need a personal API key, and there is
-        /// nowhere to put one in an open-source binary.
-        pub fn flag(&self, key: &str) -> bool {
-            let Some(inner) = &self.inner else {
-                return false;
-            };
-            inner
-                .state
-                .flags
-                .read()
-                .ok()
-                .and_then(|f| f.as_ref().map(|f| f.is_enabled(key)))
-                .unwrap_or(false)
         }
 
         /// Flush buffered events and stop the worker. Bounded by
         /// [`worker::shutdown_budget_ms`]; safe to call more than once.
         ///
-        /// Must be called explicitly on every exit path. The tray's Quit calls
-        /// `process::exit`, which runs no destructors, so `Drop` is not enough.
+        /// Must be called explicitly on every exit path: `process::exit` runs
+        /// no destructors, so `Drop` is not enough.
         pub fn shutdown(&self) {
             let Some(inner) = &self.inner else { return };
             if inner.shutdown_sent.swap(true, Ordering::SeqCst) {
@@ -257,12 +220,11 @@ mod real {
     impl Drop for Telemetry {
         /// A backstop, not the mechanism.
         ///
-        /// Every exit path calls `shutdown` explicitly, because the one that
-        /// matters most — the tray's Quit — goes through `process::exit` and
+        /// Every exit path calls `shutdown` explicitly, because `process::exit`
         /// runs no destructors at all. This only catches a handle dropped on
-        /// some path nobody thought about, and only for the last clone: shutting
-        /// the worker down when a temporary copy goes out of scope would be a
-        /// memorable bug.
+        /// some path nobody thought about, and only for the last clone:
+        /// shutting the worker down when a temporary copy goes out of scope
+        /// would be a memorable bug.
         fn drop(&mut self) {
             let last = self
                 .inner
@@ -326,11 +288,7 @@ mod inert {
             _props: &[Prop],
         ) {
         }
-        pub fn set_enabled(&self, _on: bool) {}
-        pub fn is_configured(&self) -> bool {
-            false
-        }
-        pub fn flag(&self, _key: &str) -> bool {
+        pub fn is_active(&self) -> bool {
             false
         }
         pub fn shutdown(&self) {}

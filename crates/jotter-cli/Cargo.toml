@@ -1,0 +1,67 @@
+[package]
+name = "jotter-cli"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "The `jotter` command: record a meeting to two tracks, then clean, transcribe and label it offline"
+
+# Named `jotter` although the package is `jotter-cli`: the package name only
+# has to differ from the library's, and the command people type should not.
+[[bin]]
+name = "jotter"
+path = "src/main.rs"
+
+# The benchmark driver. A separate binary rather than a `jotter` subcommand
+# because it is developer tooling: nothing a user installs should carry it, and
+# `required-features` on a non-default feature is what guarantees that — the
+# release bundle builds the default set and never sees this file.
+[[bin]]
+name = "jotter-bench"
+path = "src/bin/bench.rs"
+required-features = ["bench"]
+
+[features]
+# Everything the library offers, plus telemetry. The library leaves telemetry
+# off for host applications; this is the one program that reports as Jotter,
+# so it is the one place that turns it on.
+default = ["aec", "transcribe", "diarize", "telemetry"]
+# Each flag forwards to the library feature of the same name, which is where
+# the dependency (and the reason for making it optional) lives. They exist here
+# so a packager can build the command with any subset — `--no-default-features`
+# on this crate alone must be enough to produce an offline or C++-free binary.
+aec = ["jotter/aec"]
+transcribe = ["jotter/transcribe"]
+diarize = ["transcribe", "jotter/diarize"]
+telemetry = ["jotter/telemetry"]
+# The `jotter-bench` binary: word error rate over a speech corpus, for
+# `benchmarks/`. Off by default and never shipped.
+#
+# It exists because `jotter transcribe` is the wrong shape for a corpus. That
+# command takes a recording directory and builds a recogniser per call, and
+# LibriSpeech test-clean is 2620 utterances — reloading 660 MB of model that
+# many times is hours of the benchmark measuring its own startup. This loads the
+# model once and walks a manifest.
+#
+# What it must not become is a second implementation of the pipeline: a
+# benchmark of a reimplementation measures the reimplementation. It calls
+# `audio::transcribe::transcribe_track`, the same function the real pass calls,
+# which is why that function is `pub`. `benchmarks/bench verify` checks the two
+# paths still agree.
+bench = ["transcribe", "dep:sherpa-onnx", "dep:hound"]
+
+[dependencies]
+# Features are chosen by this crate's own flags above, never by the library's
+# defaults: with those left on, `--no-default-features` here would still build
+# every stage, and the offline and C++-free builds would be impossible to make.
+jotter = { path = "../jotter", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `jotter-bench` only. Its `--segmentation none` path feeds a whole clip to the
+# recogniser, which is the one thing the library's pass never does, so it
+# resamples and measures clips itself. Same version requirements as the
+# library's, so the lockfile resolves both to one copy — sherpa-onnx links a
+# static archive, and two of them would not link at all.
+hound = { version = "3.5", optional = true }
+sherpa-onnx = { version = "1.13", optional = true }

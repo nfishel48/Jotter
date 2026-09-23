@@ -109,10 +109,11 @@ pub trait Stage {
 /// Writes through a temporary sibling and renames it into place on success.
 ///
 /// The same discipline as `Settings::save_to`, and necessary for every stage
-/// because the tray's Quit calls `process::exit(0)`: a pass killed mid-write
-/// would otherwise leave a truncated file whose RIFF header claims it is
-/// complete. A half-written JSON transcript is no better, which is why this
-/// takes a closure over the destination rather than anything WAV-shaped.
+/// because the process can be killed at any moment — a Ctrl-C, a closed
+/// terminal: a pass killed mid-write would otherwise leave a truncated file
+/// whose RIFF header claims it is complete. A half-written JSON transcript is
+/// no better, which is why this takes a closure over the destination rather
+/// than anything WAV-shaped.
 ///
 /// `write` is handed the temporary path and may put anything there. If it
 /// fails, the rename never happens and `path` is left exactly as it was.
@@ -323,8 +324,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The bug the tmp+rename discipline exists for. The tray's Quit calls
-    /// `process::exit(0)`, so a pass can die at any point inside the closure;
+    /// The bug the tmp+rename discipline exists for. The process can be killed
+    /// at any moment, so a pass can die at any point inside the closure;
     /// whatever it had written by then must not be sitting at the destination
     /// looking like a finished artifact.
     #[test]

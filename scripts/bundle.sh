@@ -11,15 +11,16 @@
 #   scripts/bundle.sh
 #   PROFILE=release scripts/bundle.sh
 #
-# There is one binary: `jotter` opens the tray app when run with no arguments
-# and takes the CLI subcommands otherwise, so the same bundle — and so the same
-# permission grant, since the bundle id is fixed — covers both.
+# The bundle's executable is the `jotter` command itself. It has no window;
+# the bundle exists only to carry the identity and the usage strings TCC needs,
+# and since the bundle id is fixed, one permission grant covers every
+# subcommand run through it.
 
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "bundle.sh is macOS-only — .app bundles exist to satisfy TCC." >&2
-  echo "On Linux run the binary directly: scripts/run_app.sh" >&2
+  echo "On Linux run the binary directly: target/debug/jotter" >&2
   exit 1
 fi
 
@@ -46,9 +47,9 @@ if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
 else
   echo "==> building ($PROFILE)"
   if [[ "$PROFILE" == "release" ]]; then
-    cargo build --release --bin "$EXEC"
+    cargo build --release -p jotter-cli --bin "$EXEC"
   else
-    cargo build --bin "$EXEC"
+    cargo build -p jotter-cli --bin "$EXEC"
   fi
 fi
 
@@ -57,6 +58,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "target/$PROFILE/$EXEC" "$APP/Contents/MacOS/$EXEC"
+# Not decoration: with no Dock icon, this is the picture System Settings shows
+# beside Jotter in the Privacy lists, which is where a user goes to grant it.
 [[ -f assets/icon.png ]] && cp assets/icon.png "$APP/Contents/Resources/icon.png"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -86,11 +89,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>
     <string>14.6</string>
 
-    <!-- Dock icon shown. Set to <true/> for a tray-only app with no Dock
-         presence or menu bar of its own — but note that also removes Cmd-Q
-         and Cmd-Tab, leaving the tray menu as the only way to quit. -->
+    <!-- No Dock icon: the process has no window, and a command recording in
+         the background should not sit in the Dock and the Cmd-Tab switcher for
+         the length of a meeting. LSUIElement hides it from both and changes
+         nothing else; LSBackgroundOnly would go further than that needs. -->
     <key>LSUIElement</key>
-    <false/>
+    <true/>
 
     <!-- The strings the permission dialogs show. Without the matching key for
          a service, macOS kills the process instead of prompting. -->
@@ -124,8 +128,8 @@ echo
 echo "built $APP"
 echo
 echo "Run it through LaunchServices so TCC attributes the request to the bundle"
-echo "rather than to your terminal — with no --args it opens the tray app:"
+echo "rather than to your terminal:"
 echo
-echo "  open -a \"$APP\" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args devices"
+echo "  open -a \"$APP\" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args record --duration 10"
 echo
 echo "or use: scripts/check_audio.sh --bundled"

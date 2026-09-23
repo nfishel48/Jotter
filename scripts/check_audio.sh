@@ -54,27 +54,23 @@ jotter_check_linux_audio
 
 if [[ $DIRECT -eq 1 ]]; then
   echo "==> building"
-  cargo build --quiet --bin jotter
+  cargo build --quiet -p jotter-cli --bin jotter
   RUN=(./target/debug/jotter)
 else
   echo "==> building bundle"
-  # The GUI and the CLI are the same binary in the same bundle, so
-  # LaunchServices treats them as one app. If the tray app is running, `open -a`
-  # would just focus it and ignore our --args entirely.
-  if pgrep -f "Jotter.app/Contents/MacOS/" >/dev/null 2>&1; then
-    echo "==> stopping running Jotter instance (shares this bundle)"
-    killall jotter 2>/dev/null || true
-    sleep 1
-  fi
   ./scripts/bundle.sh >/dev/null
-  RUN=(open -a "$APP" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args)
+  # -n: a new instance every time. Without it, LaunchServices hands the
+  # request to any Jotter.app already running — a recording in progress —
+  # and our --args are silently dropped.
+  # -W: wait for it to exit, so its output is complete when we read it.
+  RUN=(open -n -W -a "$APP" --stdout /tmp/jotter.out --stderr /tmp/jotter.err --args)
 fi
 
 echo "==> devices"
 if [[ $DIRECT -eq 1 ]]; then
   "${RUN[@]}" devices
 else
-  rm -f /tmp/jotter.out; "${RUN[@]}" devices; sleep 2; cat /tmp/jotter.out
+  rm -f /tmp/jotter.out; "${RUN[@]}" devices; cat /tmp/jotter.out
 fi
 echo
 
@@ -120,7 +116,6 @@ if [[ $DIRECT -eq 1 ]]; then
 else
   rm -f /tmp/jotter.out /tmp/jotter.err
   "${RUN[@]}" record --only "$ONLY" --duration "$DURATION" --out "$OUT"
-  sleep $((DURATION + 4))
   cat /tmp/jotter.out
   [[ -s /tmp/jotter.err ]] && { echo "--- stderr ---"; cat /tmp/jotter.err; }
 fi

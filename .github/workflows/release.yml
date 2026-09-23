@@ -121,7 +121,7 @@ jobs:
           JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --bin jotter --target "$TARGET"
+          cargo build --release --locked -p jotter-cli --bin jotter --target "$TARGET"
 
           # Assert the architecture rather than trust the runner label: if an
           # image were relabelled, two arm64 halves would otherwise reach
@@ -217,10 +217,7 @@ jobs:
             pkg-config clang libclang-dev cmake \
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev \
-            libgtk-3-dev libayatana-appindicator3-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libasound2-dev
 
       - name: Apply the version bump
         env:
@@ -240,7 +237,7 @@ jobs:
           JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --bin jotter
+          cargo build --release --locked -p jotter-cli --bin jotter
 
           STAGE="jotter-$VERSION-linux-x86_64"
           mkdir -p "$STAGE"
@@ -326,6 +323,11 @@ jobs:
           mv dist/jotter-linux-x86_64.tar.gz "dist/jotter-$VERSION-linux-x86_64.tar.gz"
 
           cat > notes.md <<'EOF'
+          Jotter is a command-line recorder: `jotter record` captures your
+          microphone and everyone else's audio as two tracks, then removes
+          speaker echo, transcribes and labels speakers offline. `jotter --help`
+          lists every command.
+
           ## Install
 
           ### macOS (Apple Silicon and Intel)
@@ -333,38 +335,47 @@ jobs:
           Download the `.zip`, unzip, and move `Jotter.app` to `/Applications`.
 
           The app is **ad-hoc signed, not notarized**, so Gatekeeper will refuse
-          it on first launch. Either right-click the app and choose **Open**, or
-          run:
+          it on first launch. Clear the quarantine flag:
 
           ```
           xattr -dr com.apple.quarantine /Applications/Jotter.app
           ```
 
-          You must run the `.app`, not the binary inside it. macOS will not grant
-          system-audio access to an executable with no bundle identity — it feeds
-          the capture digital silence instead of prompting.
+          The bundle has no window; it exists because macOS will not grant
+          system-audio access to an executable with no bundle identity — it
+          feeds the capture digital silence instead of prompting. Run the
+          command through it, so the permission is attributed to the bundle:
+
+          ```
+          open -a Jotter --stdout /tmp/jotter.out --stderr /tmp/jotter.err \
+            --args record --duration 600
+          ```
 
           On first recording, approve **Microphone**, **Screen & System Audio
-          Recording**, and **Documents** access.
+          Recording**, and **Documents** access. Commands that touch no audio
+          device (`transcribe`, `diarize`, `models`, …) can run the binary
+          inside the bundle directly:
+          `/Applications/Jotter.app/Contents/MacOS/jotter`.
 
           ### Linux (x86_64)
 
           ```
           tar -xzf jotter-VERSION-linux-x86_64.tar.gz
           cd jotter-VERSION-linux-x86_64
-          ./jotter
+          ./jotter record --duration 600
           ```
 
           Needs a running **PipeWire** session — system-audio capture uses
           PipeWire monitor capture and cannot work on the ALSA fallback. Runtime
-          libraries: `libpipewire-0.3`, `libasound2`, `gtk3`,
-          `libayatana-appindicator3`.
+          libraries: `libpipewire-0.3`, `libasound2`.
 
           > Linux is **compile-verified only**. Capture has not been confirmed
           > against a live PipeWire session.
 
           Recordings are written to `~/Documents/Jotter/`, one folder per session
-          containing `mic.wav`, `system.wav` and `meta.json`.
+          containing `mic.wav`, `system.wav` and `meta.json`, plus
+          `transcript.json` once transcription has run (`jotter models pull`
+          fetches the speech models first).
           EOF
 
           sed -i "s/VERSION/$VERSION/g" notes.md

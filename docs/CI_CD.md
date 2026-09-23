@@ -11,8 +11,9 @@ both places.
 
 Matrix: `ubuntu-latest`, `macos-latest` (Apple Silicon) and `macos-15-intel`,
 `fail-fast: false` so a break on one platform cannot hide a break on another.
-Steps: `fmt --check`, `clippy`, `test`, `build`, and a feature-matrix `check`,
-all with `RUSTFLAGS: -D warnings`.
+Steps: `fmt --check`, `clippy`, `test`, `build` across the whole workspace, a
+build of the benchmark harness (Ubuntu only), and a feature-matrix `check`, all
+with `RUSTFLAGS: -D warnings`.
 
 Both macOS architectures are here because the release ships a universal binary
 built from a native build of each, and an x86_64-only break must fail on the
@@ -21,15 +22,28 @@ for why the cheaper thing that used to stand in for the Intel leg — a
 `cargo check --target x86_64-apple-darwin` on the Apple Silicon runner — proved
 nothing.
 
-The feature matrix exists because the GUI and the CLI are `cfg`'d halves of one
-binary: code that only compiles with both features on builds fine by default and
-breaks nobody's machine until someone builds CLI-only. With `-D warnings`, an
-import left unused under one feature fails the job.
+The feature matrix exists because the optional stages are `cfg`'d out of one
+codebase, and code that only compiles with every feature on builds fine by
+default and breaks nobody's machine until someone builds without one. With
+`-D warnings`, an import left unused under one feature set fails the job. Each
+leg is there for a reason of its own:
+
+| Leg | Why |
+| --- | --- |
+| `-p jotter` | The library with its default features (`aec`, `transcribe`, `diarize`) — exactly what a host app gets from a plain git dependency. The workspace build never sees this set on its own, because the CLI adds `telemetry` |
+| `-p jotter --no-default-features` | The bare library: capture only. No C++ WebRTC build, no ONNX runtime, no network — the floor every other feature set stands on, and the proof that turning `aec` off keeps needing no C++ toolchain |
+| `-p jotter --no-default-features --features telemetry` | The telemetry shim question below, asked of the library with no stage compiled in |
+| `-p jotter-cli --no-default-features` | The CLI, capture only. Every call it makes into a stage has to be gated for this to compile, so it is where a missing `cfg` in the CLI shows up |
+| `-p jotter-cli --no-default-features --features telemetry` | The same, with the real telemetry handle in place of the shim |
+| `-p jotter-cli --no-default-features --features aec` | Echo cancellation without transcription. `jotter record` chains the stages through `audio::finish`, and this is the build where only the first of them exists |
+| `-p jotter-cli --no-default-features --features bench` | The benchmark driver on its own. `bench` implies `transcribe` and nothing else, so this is the build that proves `jotter-bench` does not lean on `aec` or `telemetry` by accident |
 
 `telemetry` is in the matrix for a sharper version of the same reason. It ships
 two implementations of one type — the real handle and a no-op shim — so that no
 call site needs a `cfg`. Nothing but a build without the feature will notice if
-their signatures drift, and the only people who build that way are packagers.
+their signatures drift, and the only people who build that way are packagers
+and host apps — which, since the library leaves it off by default, is every
+host app.
 
 ### What the tests cover, and why so narrowly
 
@@ -46,13 +60,18 @@ hand it a duplex device and it silently records the microphone into
 ### Reproducing CI locally
 
 ```sh
-cargo fmt --all --check && cargo clippy --all-targets --locked \
-  && cargo test --all-targets --locked && cargo build --locked \
-  && cargo check --locked --no-default-features --features cli \
-  && cargo check --locked --no-default-features --features gui \
-  && cargo check --locked --no-default-features --features cli,telemetry \
-  && cargo check --locked --no-default-features --features gui,telemetry \
-  && cargo check --locked --no-default-features --features gui,cli
+cargo fmt --all --check \
+  && cargo clippy --workspace --all-targets --locked \
+  && cargo test --workspace --all-targets --locked \
+  && cargo build --workspace --locked \
+  && cargo build --locked -p jotter-cli --features bench \
+  && cargo check --locked -p jotter \
+  && cargo check --locked -p jotter --no-default-features \
+  && cargo check --locked -p jotter --no-default-features --features telemetry \
+  && cargo check --locked -p jotter-cli --no-default-features \
+  && cargo check --locked -p jotter-cli --no-default-features --features telemetry \
+  && cargo check --locked -p jotter-cli --no-default-features --features aec \
+  && cargo check --locked -p jotter-cli --no-default-features --features bench
 
 scripts/check_linux_build.sh ci   # the Linux half, in a container
 ```
@@ -60,12 +79,11 @@ scripts/check_linux_build.sh ci   # the Linux half, in a container
 The Linux half genuinely cannot be checked from macOS with plain cargo — the
 `pipewire` and `alsa` `-sys` crates need Linux headers. Note that `ci` runs the
 full gate; plain `check` only type-checks and **does not link**, which is how a
-missing system library goes unnoticed until a real `cargo build` — `tray-icon`'s
-`libxdo` was exactly this, a bare `cargo:rustc-link-lib=xdo` that only fails at
-the link step. It is no longer a dependency (see the note in `Cargo.toml`), but
-the lesson stands: type-checking a build proves less than it looks.
+missing system library goes unnoticed until a real `cargo build`: a `-sys` crate
+that emits a bare `cargo:rustc-link-lib` type-checks everywhere and fails only
+at the link step. Type-checking a build proves less than it looks.
 
-It cost a release the second time. `ci.yml` used to guard the universal macOS
+That lesson has already cost a release. `ci.yml` used to guard the universal macOS
 build with `cargo check --locked --target x86_64-apple-darwin` on the Apple
 Silicon runner, on the reasoning that `check` still runs build scripts and so
 still compiles the C++. It does — but `aec`'s bundled WebRTC/abseil build is not
@@ -96,7 +114,9 @@ flowchart LR
    committed, tagged or pushed.
 3. **build-macos** / **build-linux** — check out that SHA, re-apply the same
    bump to the working tree (so the binary reports the version about to be
-   tagged) and build. Nothing is committed here either.
+   tagged) and build only the shipped binary, with
+   `cargo build --release --locked -p jotter-cli --bin jotter` (plus `--target`
+   where the job names one). Nothing is committed here either.
 4. **package-macos** — `lipo`s the two native macOS binaries into one universal
    binary, wraps it with `bundle.sh` and zips the `.app`.
 5. **publish** — re-applies the bump, commits, tags `vX.Y.Z`, pushes, and
@@ -171,7 +191,9 @@ scripts/bump_version.sh minor     # 0.1.7 -> 0.2.0
 scripts/bump_version.sh --current
 ```
 
-The script edits `Cargo.toml` and keeps `Cargo.lock` in step, then verifies both
+The script rewrites `version` in the root `Cargo.toml`'s `[workspace.package]`
+— both crates inherit it, so there is one number to move — and keeps
+`Cargo.lock` in step, then verifies both
 agree. That check exists because the obvious implementation is wrong:
 `cargo metadata --no-deps` skips resolution and silently leaves the old version
 in the lock, which then breaks every `--locked` build downstream.
@@ -184,17 +206,22 @@ workflow runs. The `[skip ci]` in the commit message is belt-and-braces.
 | Platform | Artifact | Notes |
 | --- | --- | --- |
 | macOS | `Jotter-X.Y.Z-macos-universal.zip` | `Jotter.app`, universal via `lipo` |
-| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` binary (GUI + CLI) |
+| Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` command-line binary |
 
 **macOS ships the `.app`, not a bare binary** — and this is not cosmetic. macOS
 will not grant system-audio access to an executable with no bundle identity; it
 feeds the capture digital silence instead of prompting. A released bare binary
 would look like it worked and record nothing. `bundle.sh` reports the version CI
-is tagging — from `$VERSION` when the workflow sets it, from `Cargo.toml`
-otherwise.
+is tagging — from `$VERSION` when the workflow sets it, from the workspace
+`Cargo.toml` otherwise.
 
 A universal binary rather than two downloads, so users never have to work out
 which Mac they have.
+
+The release notes describe a command-line tool. On macOS that means running
+`jotter` through the bundle — `open -a Jotter.app --args record …` — so the
+capture is attributed to it; the bundle has no window and no Dock icon. On
+Linux the binary needs only `libpipewire-0.3` and `libasound2` at runtime.
 
 ### Build-time configuration
 
