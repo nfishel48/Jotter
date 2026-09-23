@@ -91,6 +91,16 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      # See ci.yml: rust-cache empties this directory but keeps the build
+      # script's record of it.
+      - name: Reset the sherpa-onnx prebuilt cache
+        run: |
+          rm -rf target/sherpa-onnx-prebuilt
+          if [ -d target ]; then
+            find target -type d \( -path '*/build/sherpa-onnx-sys-*' -o -path '*/.fingerprint/sherpa-onnx-sys-*' \) \
+              -prune -exec rm -rf {} +
+          fi
+
       # Mirrors ci.yml: the `aec` feature builds WebRTC's AudioProcessing from
       # source, which is a meson project.
       - name: Install macOS build dependencies
@@ -208,8 +218,20 @@ jobs:
         with:
           key: release-ubuntu-latest
 
+      # See ci.yml: rust-cache empties this directory but keeps the build
+      # script's record of it.
+      - name: Reset the sherpa-onnx prebuilt cache
+        run: |
+          rm -rf target/sherpa-onnx-prebuilt
+          if [ -d target ]; then
+            find target -type d \( -path '*/build/sherpa-onnx-sys-*' -o -path '*/.fingerprint/sherpa-onnx-sys-*' \) \
+              -prune -exec rm -rf {} +
+          fi
+
       # Mirrors ci.yml. cmake is for aws-lc-sys, which builds a C crypto library
-      # and arrives via posthog-rs -> reqwest -> rustls.
+      # and arrives via posthog-rs -> reqwest -> rustls; liblzma-dev is for
+      # sherpa-onnx-sys's build script (zip -> xz2 -> lzma-sys) — see ci.yml
+      # for why it must be installed even though lzma-sys can bundle its own.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -217,7 +239,7 @@ jobs:
             pkg-config clang libclang-dev cmake \
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev
+            libasound2-dev liblzma-dev
 
       - name: Apply the version bump
         env:

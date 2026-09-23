@@ -50,6 +50,23 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # sherpa-onnx-sys unpacks its prebuilt static libraries into
+      # target/sherpa-onnx-prebuilt, which is not a Cargo profile directory,
+      # so rust-cache's pruning deletes every *file* under it and keeps the
+      # directories. The restored build-script output still points there, and
+      # the empty `lib/` also passes the script's own "already downloaded"
+      # check — so any build that links it fails with "could not find native
+      # static library `sherpa-onnx-c-api`". Dropping the directory and the
+      # script's cached run makes it download and unpack again.
+      - name: Reset the sherpa-onnx prebuilt cache
+        shell: bash
+        run: |
+          rm -rf target/sherpa-onnx-prebuilt
+          if [ -d target ]; then
+            find target -type d \( -path '*/build/sherpa-onnx-sys-*' -o -path '*/.fingerprint/sherpa-onnx-sys-*' \) \
+              -prune -exec rm -rf {} +
+          fi
+
       # The `aec` feature builds WebRTC's AudioProcessing from source, which is
       # an autotools/meson project. `bundled` is deliberate: linking a system
       # libwebrtc-audio-processing would make the build depend on a package most
@@ -64,6 +81,13 @@ jobs:
       # cmake is for aws-lc-sys, which builds a C crypto library and arrives via
       # posthog-rs -> reqwest -> rustls. GitHub's image happens to ship it, but
       # depending on that implicitly is how a release breaks on an image bump.
+      #
+      # liblzma-dev is for sherpa-onnx-sys's *build script*, which unpacks its
+      # prebuilt archive via zip -> xz2 -> lzma-sys. lzma-sys links the system
+      # liblzma when pkg-config finds one and compiles its own copy otherwise,
+      # and never revisits that choice — so a target dir cached while the old
+      # GUI toolkit's headers happened to pull liblzma-dev in fails to link
+      # without it. Installing it explicitly makes the cached choice hold.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -72,7 +96,7 @@ jobs:
             pkg-config clang libclang-dev cmake \
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev
+            libasound2-dev liblzma-dev
 
       - name: Format
         run: cargo fmt --all --check

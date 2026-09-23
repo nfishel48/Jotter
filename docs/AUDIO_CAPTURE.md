@@ -169,15 +169,19 @@ Build dependencies (Debian/Ubuntu names):
 
 ```
 pkg-config clang libclang-dev cmake meson ninja-build
-libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+libpipewire-0.3-dev libspa-0.2-dev libasound2-dev liblzma-dev
 ```
 
 This list is what CI installs; keep the two in step, since a package that is
 only in one of them shows up as a build that works in exactly one place.
 `meson` and `ninja-build` are for the `aec` feature's bundled WebRTC build;
-`cmake` builds the C crypto library behind the HTTPS client. At runtime the
-binary needs only `libpipewire-0.3` and `libasound2` — there is no display
-server dependency, X11 or Wayland, because there is no window.
+`cmake` builds the C crypto library behind the HTTPS client; `liblzma-dev` is
+for sherpa-onnx's build script, which unpacks its prebuilt archive with `zip` →
+`xz2` → `lzma-sys` — that crate falls back to a bundled liblzma when pkg-config
+finds none, but a cached target directory keeps whichever it chose first, so CI
+installs it rather than depend on the fallback. At runtime the binary needs only
+`libpipewire-0.3` and `libasound2` — there is no display server dependency, X11
+or Wayland, because there is no window.
 
 Differences from macOS:
 

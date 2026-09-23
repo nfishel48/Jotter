@@ -31,8 +31,11 @@ fi
 echo "==> cargo $CMD for Linux (pipewire feature enabled)"
 
 # Deps for: the pipewire host, the alsa fallback, `aec`'s WebRTC build (meson,
-# ninja, clang) and aws-lc-sys under posthog-rs (cmake). Nothing graphical:
-# Jotter has no window, so no toolkit or display-server headers.
+# ninja, clang), aws-lc-sys under posthog-rs (cmake) and sherpa-onnx-sys's
+# build script (liblzma, via zip -> xz2 -> lzma-sys). The rust image already
+# carries several of these; they are listed anyway so this stays the same list
+# CI installs on a bare runner. Nothing graphical: Jotter has no window, so no
+# toolkit or display-server headers.
 #
 # trixie rather than bookworm for meson: webrtc-audio-processing-sys runs
 # `meson setup --reconfigure` on a fresh build directory, which bookworm's
@@ -50,7 +53,7 @@ docker run --rm -t \
       pkg-config clang libclang-dev \
       cmake meson ninja-build \
       libpipewire-0.3-dev libspa-0.2-dev \
-      libasound2-dev \
+      libasound2-dev liblzma-dev \
       >/dev/null 2>&1
     echo "--- toolchain ---"
     rustc --version
