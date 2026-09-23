@@ -14,6 +14,7 @@ so a break on one platform cannot hide a break on another. Steps:
 `fmt --check`, `clippy`, `test`, `build` across the whole workspace, a build of
 the benchmark harness (Ubuntu only), and a feature-matrix `check`, all with
 `RUSTFLAGS: -D warnings`.
+Cargo cache saves only on `main` and `trunk/cli-agent` (a pull request restores the base ref and does not save); `test` runs before `clippy`, the redundant workspace `build` and default-features `cargo check -p jotter` are omitted, and sccache (local disk) covers the WebRTC C++ rebuild.
 
 There is no Intel macOS leg. Jotter supports Apple Silicon only — Intel Macs
 were dropped deliberately — so the one macOS runner is the architecture the
