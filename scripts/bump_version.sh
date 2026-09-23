@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Bump the version in Cargo.toml (and keep Cargo.lock in step).
+# Bump the workspace version in Cargo.toml (and keep Cargo.lock in step).
+#
+# Both crates take their version from `[workspace.package]`, so this one line
+# is the whole release number.
 #
 # CI runs `patch` automatically on every push to main. Run `minor` or `major`
 # by hand when you want one, commit it, and the next automatic patch bump
@@ -20,10 +23,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$ROOT/Cargo.toml"
 LOCKFILE="$ROOT/Cargo.lock"
 
-# Only the [package] version, which is the first `version = ` in the file.
-# Matching loosely would rewrite dependency versions instead.
+# Only the [workspace.package] version, which is the only `version = ` in that
+# section. Matching loosely would rewrite dependency versions instead.
 current() {
-  awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version *= *"/{
+  awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && /^version *= *"/{
     match($0, /"[^"]+"/); print substr($0, RSTART+1, RLENGTH-2); exit
   }' "$MANIFEST"
 }
@@ -54,14 +57,14 @@ esac
 NEW="$MAJOR.$MINOR.$PATCH"
 echo "==> $CUR -> $NEW ($KIND)" >&2
 
-# Rewrite only the [package] version. Done with awk rather than sed so the
-# section boundary is respected and a dependency pinned to the same version
-# string cannot be caught by accident.
+# Rewrite only the [workspace.package] version. Done with awk rather than sed
+# so the section boundary is respected and a dependency pinned to the same
+# version string cannot be caught by accident.
 tmp="$(mktemp)"
 awk -v new="$NEW" '
-  /^\[package\]/ { p = 1 }
+  /^\[workspace\.package\]/ { p = 1 }
   p && /^version *= *"/ && !done { sub(/"[^"]+"/, "\"" new "\""); done = 1 }
-  /^\[/ && !/^\[package\]/ { p = 0 }
+  /^\[/ && !/^\[workspace\.package\]/ { p = 0 }
   { print }
 ' "$MANIFEST" > "$tmp"
 mv "$tmp" "$MANIFEST"

@@ -6,15 +6,16 @@ the way published leaderboards score them.
 The method — and what the numbers do and do not say — is
 [`docs/BENCHMARKS.md`](../docs/BENCHMARKS.md). This is how to run it.
 
-Nothing here ships. The `bench` cargo feature is off by default, and the Python
-lives in its own virtualenv so `scripts/` stays stdlib-only.
+Nothing here ships. The `bench` cargo feature of `jotter-cli` is off by
+default, and the Python lives in its own virtualenv so `scripts/` stays
+stdlib-only.
 
 ## Setup
 
 ```bash
-./bootstrap.sh                                 # venv + Whisper's spelling map
-cd .. && cargo build --release --features bench # the driver
-jotter models pull                             # the speech model, ~660 MB
+./bootstrap.sh                                                # venv + Whisper's spelling map
+cd .. && cargo build --release -p jotter-cli --features bench # the driver
+jotter models pull                                            # the speech model, ~660 MB
 ```
 
 `bootstrap.sh` fetches OpenAI's `english.json`, which is what makes a score here
@@ -187,7 +188,8 @@ right track?
 
 ## Echo cancellation
 
-Needs the `aec` feature: `cargo build --release --features bench,aec`.
+Needs the `aec` feature, which `jotter-cli` builds by default:
+`cargo build --release -p jotter-cli --features bench,aec` makes it explicit.
 
 ```bash
 ./bench prepare --corpus librispeech-test-clean

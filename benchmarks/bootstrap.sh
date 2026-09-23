@@ -60,7 +60,7 @@ fi
 cat <<'EOF'
 
 Next:
-  cargo build --release --features bench      # from the repository root
-  benchmarks/bench list                       # what can be measured
-  benchmarks/bench smoke                      # does the harness work
+  cargo build --release -p jotter-cli --features bench  # from the repository root
+  benchmarks/bench list                                 # what can be measured
+  benchmarks/bench smoke                                # does the harness work
 EOF

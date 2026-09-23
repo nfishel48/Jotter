@@ -1,169 +1,21 @@
-[package]
-name = "jotter"
+[workspace]
+# Two crates, split along the line a host application cares about: `jotter` is
+# the library — capture, the offline passes, the model catalogue — and
+# `jotter-cli` is the `jotter` binary built on it. Keeping clap and every
+# terminal concern out of the library is what lets another program depend on it
+# without inheriting a command-line parser it will never use.
+members = ["crates/*"]
+# Explicit because a virtual manifest has no `edition` of its own to infer the
+# resolver from, and would otherwise fall back to resolver 1 — the pre-2021
+# feature unification, under which a dev- or build-dependency's features leak
+# into the normal build. The feature matrix in CI is only meaningful if a
+# `--no-default-features` build really is one.
+resolver = "3"
+
+# One version for both crates. They are released together from one tag, and a
+# CLI reporting a different version from the library it was built with would
+# only ever confuse a bug report. `scripts/bump_version.sh` rewrites this line.
+[workspace.package]
 version = "0.1.17"
 edition = "2024"
-
-[lib]
-name = "jotter"
-path = "src/lib.rs"
-
-[[bin]]
-name = "jotter"
-path = "src/main.rs"
-
-# The benchmark driver. A separate binary rather than a `jotter` subcommand
-# because it is developer tooling: nothing a user installs should carry it, and
-# `required-features` on a non-default feature is what guarantees that — the
-# release bundle builds the default set and never sees this file.
-[[bin]]
-name = "jotter-bench"
-path = "src/bin/bench.rs"
-required-features = ["bench"]
-
-[features]
-default = ["gui", "cli", "telemetry", "aec", "transcribe", "diarize"]
-# The tray app. Pulls in the whole desktop stack — eframe/egui plus, on Linux,
-# gtk/x11/wayland via tray-icon — which is why a CLI-only build turns it off.
-gui = ["dep:eframe", "dep:egui", "dep:image", "dep:tray-icon"]
-# The `record` / `devices` subcommands.
-cli = ["dep:clap"]
-# Anonymous usage and crash reporting. Off means the binary has no HTTP client
-# and no async runtime at all — the whole network stack is behind this flag, so
-# a distro or fork rebuild can produce a provably offline binary. Everything in
-# `src/telemetry` has a no-op shim, so no call site is `cfg`-gated.
-telemetry = ["dep:posthog-rs", "dep:tokio", "dep:uuid"]
-# Offline echo cancellation: removing speaker bleed from the mic track after a
-# recording ends. Off means the C++ audio-processing stack is not built at all,
-# and the build needs no `meson`/`ninja` — the same kind of guarantee
-# `telemetry` gives for the network stack.
-aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
-# Offline transcription: turning a finished recording into a transcript. Like
-# `aec`, its own stage behind its own flag, so a build can drop the whole
-# inference stack. Off means no ONNX runtime is linked and the model catalogue
-# does not exist — and, since the catalogue is the only thing that knows any
-# download URLs, no model can be fetched either.
-transcribe = ["dep:sherpa-onnx", "dep:ureq", "dep:sha2"]
-# Speaker diarization: working out which of several people on the system track
-# said each segment, and filling in the `speaker` field `transcript.json` has
-# reserved since v1.
-#
-# Implies `transcribe` rather than repeating its dependency list, because this
-# is not an independent stage in the way `aec` is: it labels a transcript, so a
-# build that cannot produce one has nothing for it to do. Enabling it adds no
-# new dependency at all — sherpa-onnx already exposes `OfflineSpeakerDiarization`
-# and the symbols are in the same prebuilt static archive the transcription
-# stage already links. The cost is two more models to download (~35 MB), which
-# is the reason it is still a flag rather than part of `transcribe`.
-diarize = ["transcribe"]
-# The `jotter-bench` binary: word error rate over a speech corpus, for
-# `benchmarks/`. Off by default and never shipped.
-#
-# It exists because `jotter transcribe` is the wrong shape for a corpus. That
-# command takes a recording directory and builds a recogniser per call, and
-# LibriSpeech test-clean is 2620 utterances — reloading 660 MB of model that
-# many times is hours of the benchmark measuring its own startup. This loads the
-# model once and walks a manifest.
-#
-# What it must not become is a second implementation of the pipeline: a
-# benchmark of a reimplementation measures the reimplementation. It calls
-# `audio::transcribe::transcribe_track`, the same function the real pass calls,
-# which is why that function is `pub`. `benchmarks/bench verify` checks the two
-# paths still agree.
-#
-# Implies `cli` rather than a bare `dep:clap` so that `--features bench` builds
-# the whole workspace: `src/main.rs` refuses to compile with neither front end,
-# so enabling only clap would make the obvious command fail on the *other*
-# binary.
-bench = ["transcribe", "cli"]
-
-[dependencies]
-# For local-time folder names. Worth the dependency: deriving a DST-correct
-# local offset by hand is a real bug surface, and the default features include
-# the `clock` support needed for Local::now().
-chrono = "0.4"
-cpal = "0.18"
-hound = "3.5"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-clap = { version = "4.6", features = ["derive"], optional = true }
-eframe = { version = "0.36.1", optional = true }
-egui = { version = "0.36.1", optional = true }
-image = { version = "0.25.10", optional = true }
-# default-features off to drop `libxdo`, which is otherwise a hard `-lxdo` link
-# on Linux. muda uses it only to synthesise X11 key events for predefined menu
-# items (Copy/Paste/…); our menu is custom items only. It is also useless on a
-# Wayland session, which cannot be driven by XTEST.
-tray-icon = { version = "0.24.2", optional = true, default-features = false, features = [
-  "gtk",
-] }
-
-# Default features are what we want: `async-client` (+ tokio) and
-# `error-tracking`, which is what supplies the panic hook and the symbolicated
-# stack traces. Local flag evaluation is deliberately unused — it needs a
-# personal API key, and there is nowhere to hide one in an open-source binary.
-posthog-rs = { version = "0.25", optional = true }
-# Only the runtime; posthog-rs brings its own reqwest/hyper stack. One worker
-# thread is plenty for a handful of events per session.
-tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
-# The install id. v4 only: it must be random, not derived from anything about
-# the machine.
-uuid = { version = "1", features = ["v4"], optional = true }
-
-# WebRTC's AudioProcessing module, via PulseAudio's repackaging of it — the AEC3
-# echo canceller that browsers and every serious conferencing app use.
-#
-# `bundled` builds the C++ from source rather than linking a system library, so
-# there is no `libwebrtc-audio-processing-dev` for a user to be missing. It does
-# mean the build needs `clang`, `pkg-config`, `meson` and `ninja`; that cost is
-# confined to the `aec` feature.
-#
-# Writing the canceller by hand was tried first, over vendored Speex MDF, and the
-# measurements are why this is here instead: on the reference recording Speex
-# reached 1.8 dB where AEC3 reaches 20 dB on echo-only passages and 17.6 dB
-# through double-talk, while costing 0.29 dB on the user's own voice. AEC3
-# additionally estimates the echo delay itself, which removes a whole stage —
-# and a whole class of bug — from our side.
-webrtc-audio-processing = { version = "2.1", features = [
-  "bundled",
-], optional = true }
-# The config types live in their own crate and are only partly re-exported by the
-# parent, so `EchoCanceller` has to be named here.
-webrtc-audio-processing-config = { version = "2.1", optional = true }
-
-# Speech recognition and voice activity detection, over onnxruntime.
-#
-# Static linking is this crate's default and the reason it was chosen: the build
-# script fetches a prebuilt static archive for the host target and links it in,
-# so the shipped artifact is still a single binary with no `libsherpa-onnx` for
-# a user to be missing. That is the same guarantee `bundled` gives for the
-# WebRTC stack above, reached a different way — prebuilt rather than compiled
-# here, so unlike `aec` this adds no meson/ninja to the build.
-#
-# The cost is that the *build* now downloads that archive from GitHub releases.
-# `SHERPA_ONNX_LIB_DIR` (a directory of libraries) and `SHERPA_ONNX_ARCHIVE_DIR`
-# (a pre-downloaded archive) are the levers if that ever has to happen offline.
-sherpa-onnx = { version = "1.13", optional = true }
-
-# `jotter models pull`, and nothing else. Deliberately not reqwest, which is
-# already in the tree via posthog-rs: that one arrives with tokio and a whole
-# async runtime, and this is a blocking download from a CLI command with nothing
-# to overlap it with. Default features give rustls over ring with bundled
-# webpki roots, so there is no system OpenSSL to link — the same single-binary
-# property the rest of the dependency list is chosen for.
-ureq = { version = "3.4", optional = true }
-# Verifying what was downloaded is what makes the download safe to trust later:
-# `Model::resolve` checks only sizes, because re-hashing 660 MB before every
-# transcription would cost more than the transcription.
-sha2 = { version = "0.11", optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# Cargo unions this with the base cpal dependency above, so Linux builds
-# additionally get the native PipeWire host. cpal's default_host() then prefers
-# PipeWire over PulseAudio and ALSA automatically when the daemon is running,
-# so no host selection is needed in our code.
-#
-# This feature is what makes system-audio capture work on Linux: opening an
-# input stream on a sink makes the host set STREAM_CAPTURE_SINK, which is
-# PipeWire's monitor-capture mechanism. The ALSA fallback has no equivalent.
-cpal = { version = "0.18", features = ["pipewire"] }
+repository = "https://github.com/nfishel48/Jotter"

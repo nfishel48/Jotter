@@ -10,14 +10,17 @@ on:
   workflow_call: # so release.yml can gate on exactly this suite
 
 concurrency:
-  # Supersede in-flight runs for the same branch; the newest push is the one
-  # anyone cares about.
-  #
-  # github.workflow is included because in a reusable workflow it resolves to
-  # the *caller's* name ("Release"), keeping release runs in a separate group
-  # from direct CI runs. Without it both evaluate to the same key and cancel
-  # each other.
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Key on the branch name, not github.ref. A push is refs/heads/<branch> and
+  # the pull_request run is refs/pull/N/merge, so a ref key let both finish
+  # and write two caches. head_ref is set only on pull_request, so both events
+  # share this group. cancel-in-progress stays on: the older run is dropped.
+  # The pull_request run (the merge commit) is the one that should survive —
+  # GitHub opens it after the push, and a later push is followed by
+  # pull_request synchronize, which cancels that push and keeps the merge
+  # commit. github.workflow stays in the key because in a reusable workflow it
+  # resolves to the *caller's* name ("Release"), keeping release runs in a
+  # separate group from direct CI runs.
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -31,13 +34,10 @@ jobs:
     strategy:
       fail-fast: false # a Linux-only break should not hide a macOS-only one
       matrix:
-        # Both macOS architectures, because release.yml ships a universal
-        # binary built from a native build of each. macos-latest is Apple
-        # Silicon; macos-15-intel is the Intel image (there is no
-        # macos-latest-intel). Without the Intel leg an x86_64-only break —
-        # the `aec` link failure that sank v0.1.7 was one — reaches main and
-        # surfaces during a release instead of on the pull request.
-        os: [ubuntu-latest, macos-latest, macos-15-intel]
+        # Apple Silicon is the only macOS Jotter supports — Intel Macs were
+        # dropped deliberately — so macos-latest is the one macOS leg, matching
+        # the arm64-only release build.
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -46,24 +46,94 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Save only on the branches PRs actually restore from. A feature-branch
+      # or PR cache is 1.2–1.9 GB and evicts trunk's, so the next trunk build
+      # is cold (11–20 min). save-if false still restores; PRs read the base
+      # ref's cache. See docs/CI_CD.md.
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/trunk/cli-agent' }}
+
+      # sherpa-onnx-sys unpacks its prebuilt static libraries into
+      # target/sherpa-onnx-prebuilt, which is not a Cargo profile directory,
+      # so rust-cache's pruning deletes every *file* under it and keeps the
+      # directories. The restored build-script output still points there, and
+      # the empty `lib/` also passes the script's own "already downloaded"
+      # check — so any build that links it fails with "could not find native
+      # static library `sherpa-onnx-c-api`". Dropping the directory and the
+      # script's cached run makes it download and unpack again.
+      - name: Reset the sherpa-onnx prebuilt cache
+        shell: bash
+        run: |
+          rm -rf target/sherpa-onnx-prebuilt
+          if [ -d target ]; then
+            find target -type d \( -path '*/build/sherpa-onnx-sys-*' -o -path '*/.fingerprint/sherpa-onnx-sys-*' \) \
+              -prune -exec rm -rf {} +
+          fi
+
+      # Install only. Do not set SCCACHE_GHA_ENABLED — the cache step below
+      # persists the local disk backend.
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      # One entry per OS/arch/webrtc version, not per branch: the C++ objects
+      # are content-addressed, and a per-ref archive would evict trunk the
+      # same way the Cargo cache used to.
+      - name: Webrtc version for the sccache key
+        id: webrtc
+        shell: bash
+        run: |
+          ver=$(awk '
+            $0 == "name = \"webrtc-audio-processing-sys\"" { found = 1; next }
+            found && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.lock)
+          if [ -z "$ver" ]; then
+            echo "webrtc-audio-processing-sys version missing from Cargo.lock" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      # Local disk, not the GHA backend: that one writes an Actions cache
+      # entry per object and fights the Cargo cache for the 10 GB cap.
+      # `runner` is not legal in job env, and actions/cache does not expand
+      # `~` (macOS's default sccache dir is not ~/.cache either).
+      - name: Persist sccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.os == 'Linux' && '/home/runner/.cache/sccache' || '/Users/runner/.cache/sccache' }}
+          key: sccache-${{ runner.os }}-${{ runner.arch }}-webrtc-audio-processing-${{ steps.webrtc.outputs.version }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ runner.arch }}-webrtc-audio-processing-
 
       # The `aec` feature builds WebRTC's AudioProcessing from source, which is
       # an autotools/meson project. `bundled` is deliberate: linking a system
       # libwebrtc-audio-processing would make the build depend on a package most
       # distros ship at a different major version.
+      #
+      # CC/CXX wrap clang so a feature-matrix leg that re-runs meson hits
+      # sccache instead of compiling WebRTC again (~100s macOS, ~70s Linux).
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install pkg-config meson ninja
+        run: |
+          brew install pkg-config meson ninja
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "CC=sccache clang" >> "$GITHUB_ENV"
+          echo "CXX=sccache clang++" >> "$GITHUB_ENV"
 
       # Needed to *compile* on Linux, not to run: the pipewire/alsa -sys crates
-      # need real headers, and eframe + tray-icon pull in gtk/x11/wayland.
+      # need real headers, and `aec` builds WebRTC's C++ with meson.
       #
       # cmake is for aws-lc-sys, which builds a C crypto library and arrives via
       # posthog-rs -> reqwest -> rustls. GitHub's image happens to ship it, but
       # depending on that implicitly is how a release breaks on an image bump.
+      #
+      # liblzma-dev is for sherpa-onnx-sys's *build script*, which unpacks its
+      # prebuilt archive via zip -> xz2 -> lzma-sys. lzma-sys links the system
+      # liblzma when pkg-config finds one and compiles its own copy otherwise,
+      # and never revisits that choice — so a target dir cached while the old
+      # GUI toolkit's headers happened to pull liblzma-dev in fails to link
+      # without it. Installing it explicitly makes the cached choice hold.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -72,30 +142,27 @@ jobs:
             pkg-config clang libclang-dev cmake \
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev \
-            libgtk-3-dev libayatana-appindicator3-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libasound2-dev liblzma-dev
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "CC=sccache clang" >> "$GITHUB_ENV"
+          echo "CXX=sccache clang++" >> "$GITHUB_ENV"
 
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --all-targets --locked
-
-      # Runners are headless with no audio devices, so the suite deliberately
-      # covers only pure logic — conversion, downmix, the loopback duplex
-      # guard, metadata. Anything touching cpal device enumeration would be
-      # flaky here and belongs in scripts/check_audio.sh instead.
+      # Test before clippy so clippy reuses this build. `cargo test` already
+      # compiles the workspace, so a following `cargo build --workspace` only
+      # rebuilt webrtc-audio-processing-sys. Clippy args do not change the
+      # rustc fingerprint (RUSTFLAGS already denies warnings), so this shares
+      # that build. Not `--no-deps`: that would skip dependency lints and can
+      # hide a warning the workspace command is here to catch.
       - name: Test
-        run: cargo test --all-targets --locked
+        run: cargo test --workspace --all-targets --locked
 
-      - name: Build
-        run: cargo build --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # The GUI and the CLI are cfg'd halves of one binary, so a change that
-      # only compiles with both features on is easy to miss. RUSTFLAGS above
-      # makes an import that is unused under one feature a hard failure here.
       # The benchmark harness. Linux only: it is the same Python everywhere and
       # paying for it three times buys nothing.
       #
@@ -107,33 +174,52 @@ jobs:
       # writes parseable output, and `recording.py` still produces a meta.json
       # that Jotter parses. That last one is the guard on the only place the
       # harness duplicates a format the Rust owns.
+      - name: Cache benchmark virtualenv
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.venv
+          key: bench-venv-${{ runner.os }}-${{ hashFiles('benchmarks/requirements.txt') }}
+
       - name: Benchmark harness
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --locked --features bench
+          cargo build --locked -p jotter-cli --features bench
           ./benchmarks/bootstrap.sh
           ./benchmarks/.venv/bin/python -m unittest discover -s benchmarks/tests -t benchmarks -v
           ./benchmarks/bench smoke
 
+      # Every stage is its own feature in the library and the CLI forwards
+      # each one, so a change that only compiles with all of them on is easy to
+      # miss. RUSTFLAGS above makes an import that is unused under one
+      # combination a hard failure here. `-p` matters: features are selected
+      # per package, and a bare `--no-default-features` at the workspace root
+      # would build neither crate the way anyone depends on it.
+      #
+      # The plain `cargo check -p jotter` leg (library defaults, no telemetry)
+      # is gone: it re-unified features against the workspace build `test`
+      # just produced and rebuilt webrtc-audio-processing-sys for no new cfg.
+      # The legs below are the ones whose feature sets actually differ.
       - name: Build (feature matrix)
         run: |
-          cargo check --locked --no-default-features --features cli
-          cargo check --locked --no-default-features --features gui
+          # Capture alone. A host that only records must not need meson, a C++
+          # toolchain, an ONNX runtime or any network code, and the only way
+          # that stays true is by checking it.
+          cargo check --locked -p jotter --no-default-features
           # `telemetry` has a no-op shim so that no call site needs a cfg, which
           # means the shim's signatures can drift from the real ones without
           # anything noticing until a packager builds without it. Both halves
-          # get checked against both front ends.
-          cargo check --locked --no-default-features --features cli,telemetry
-          cargo check --locked --no-default-features --features gui,telemetry
-          cargo check --locked --no-default-features --features gui,cli
-          # `aec` builds WebRTC's AudioProcessing from source. The leg that
-          # matters most is the one *without* it: a distro or fork that turns
-          # `aec` off must not need meson, ninja or a C++ toolchain at all, and
-          # the only way that stays true is by checking it.
-          cargo check --locked --no-default-features --features cli,aec
-          cargo check --locked --no-default-features --features gui,aec
+          # get checked, in the library and through the command.
+          cargo check --locked -p jotter --no-default-features --features telemetry
+          cargo check --locked -p jotter-cli --no-default-features
+          cargo check --locked -p jotter-cli --no-default-features --features telemetry
+          # `aec` alone, through the command: a distro or fork that turns
+          # transcription off must still get a working echo pass.
+          cargo check --locked -p jotter-cli --no-default-features --features aec
           # `bench` builds the benchmark driver in `benchmarks/`. It is off by
           # default and never shipped, which is exactly why it needs checking:
-          # nothing else in this matrix compiles `src/bin/bench.rs`, so it
-          # would rot silently until someone next tried to measure something.
-          cargo check --locked --no-default-features --features bench
+          # nothing else in this matrix compiles `crates/jotter-cli/src/bin/bench.rs`,
+          # so it would rot silently until someone next tried to measure
+          # something. It is also the one leg with `transcribe` but no
+          # `diarize`.
+          cargo check --locked -p jotter-cli --no-default-features --features bench

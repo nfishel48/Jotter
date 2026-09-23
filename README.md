@@ -2,7 +2,7 @@
 ## jotter is a fully local recording, transcription, and semantic search tool
 
 ### jotter is still in early development but thr roadmap is as follows
-- Start/stop recording from a menu bar or floating window.   
+- Start/stop recording from the terminal, or from any app that links the library.   
 -  Meeting appears as a transcript with speakers and times.    
 -  Search box: “refund policy”, “what Jane said about pricing”.   
 -  Results show snippet + meeting + timestamp; click plays that moment.   
@@ -12,6 +12,10 @@
 
 ## Using Jotter
 Jotter tries to be simple for less technical users to use and still get the advantages of local only transcription and semantic search while still be less opinionated then then other tools and allowing those who want to change things.
+
+Runs on macOS on Apple Silicon and on Linux x86_64 (PipeWire; compile-verified
+so far). Intel Macs are deliberately not supported, and releases ship an arm64
+`Jotter.app` only.
 
 ## Getting a transcript
 
@@ -27,15 +31,22 @@ Default model is NVIDIA Parakeet TDT 0.6b v2 (English), run through [sherpa-onnx
 Then either transcribe an existing recording:
 
 ```bash
-jotter transcribe recordings/2026-09-15_14-32-08
+jotter transcribe ~/Documents/Jotter/2026-09-15_14-32-08
 ```
 
-or have every recording transcribed as it finishes tick **Transcribe
-recordings when they finish** in the settings pane, or for a single run:
+or have every recording transcribed as it finishes with
+`jotter config set transcribe true`, or for a single run:
 
 ```bash
 jotter record --transcribe --duration 600
 ```
+
+`jotter record` blocks until the recording ends. To record in the background
+and get on with something else, `jotter start` launches a recorder and returns
+at once; `jotter status` shows whether it is running and `jotter stop` ends it
+and runs the same offline passes. On macOS the recorder runs inside
+`Jotter.app`, which is what carries the microphone and system-audio
+permissions.
 
 That writes `transcript.json` beside the audio. Your microphone and everyone
 else's audio are transcribed separately and merged onto one timeline, so each
@@ -45,6 +56,35 @@ segment already says whether it was you or the room:
 { "start": 0.42, "end": 3.10, "track": "mic", "text": "morning all" }
 ```
 
+## Listening to a meeting
+
+`jotter start` transcribes while it records, into `live.jsonl` beside the audio,
+unless you pass `--no-live`. The lines are a second or two behind the room, and
+they are the rough copy: the final `transcript.json`, written when the recording
+stops, is the one to keep.
+
+```bash
+jotter start --json
+jotter context --json                  # what has been said so far
+jotter context --since live:1a4 --json # only lines past that cursor
+jotter context --last 30 --json        # the last 30 seconds
+jotter context --follow                # one JSON object per new segment, until the session ends
+jotter status --json                   # session.live is {state, segments, last_end_secs}
+jotter recordings --json               # recent recordings and which files they have
+jotter stop --json
+```
+
+While the session is recording and `live.jsonl` is still empty, `status` reports
+live state `starting` with `segments` 0. The first line moves it to `running`.
+A missing model, or a live pass that broke, shows up as `declined` or `failed`
+once `stop` has written `meta.json`; the recording itself is unaffected.
+
+`context` reads the active session. Pass `--dir` to read some other recording,
+or leave both off and it reads the most recent one under `~/Documents/Jotter`.
+Once that recording has finished and `transcript.json` is there, that file is
+what comes back (`source` `"transcript"`, `complete` true), including `speaker`
+when diarization has labelled a segment.
+
 ## Who said it
 
 `track` already separates you from everyone else, for free — that is the whole
@@ -52,7 +92,7 @@ point of recording two files. Telling apart the several people inside the
 `system` track is a second pass:
 
 ```bash
-jotter diarize recordings/2026-09-15_14-32-08 --speakers 4
+jotter diarize ~/Documents/Jotter/2026-09-15_14-32-08 --speakers 4
 ```
 
 That fills in a `speaker` on each system segment, in place, without
@@ -71,11 +111,58 @@ count them instead, and it is not reliable enough to ship: on a clean recording
 it is right, and on a thirty-six minute meeting of three people who talked over
 each other it reported two hundred and eight speakers. A transcript that
 confidently names two hundred and eight people is worse than one that names
-none, so the number comes from you. Set it once in the settings pane, or pass
-`--speakers` per run.
+none, so the number comes from you. Set it once as `diarize_speakers` in
+`settings.json`, or pass `--speakers` per run.
 
-Speaker identification is off by default and needs two more models (~44 MB),
-fetched by the same `jotter models pull`.
+Speaker identification is off by default (`diarize_enabled`, or `--diarize` for
+one run) and needs two more models (~44 MB), fetched by the same `jotter models pull`.
+
+## Settings
+
+There is no settings window: Jotter is a command-line tool, and the few
+preferences it keeps live in one JSON file. Change them with `jotter config`
+rather than editing it by hand:
+
+```bash
+jotter config                       # show every setting
+jotter config set transcribe true   # transcribe every recording
+jotter config set speakers 4        # how many people are on your calls
+```
+
+- macOS — `~/Library/Application Support/Jotter/settings.json`
+- Linux — `${XDG_CONFIG_HOME:-~/.config}/jotter/settings.json`
+
+`jotter config` prints the exact path.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `aec_enabled` | `true` | Remove speaker echo from your mic track when a recording stops |
+| `transcribe_enabled` | `false` | Transcribe every recording when it stops |
+| `diarize_enabled` | `false` | Label the people in the system track after transcribing |
+| `diarize_speakers` | `0` (not set) | How many people were on the call |
+| `telemetry_enabled` | `true` | Anonymous usage and crash reports — see [docs/TELEMETRY.md](docs/TELEMETRY.md) |
+
+Any of the first three can be overridden for a single `jotter record` with
+`--aec`/`--no-aec`, `--transcribe`/`--no-transcribe` and
+`--diarize`/`--no-diarize`. Recordings go to `~/Documents/Jotter/<timestamp>/`
+unless you pass `--out`.
+
+## Using Jotter as a library
+
+Everything the `jotter` command does lives in the `jotter` library crate
+(`crates/jotter`); the CLI in `crates/jotter-cli` is a thin layer over it. Another
+Rust program can record, finish and read a transcript through the same code:
+
+```toml
+jotter = { git = "https://github.com/nfishel48/Jotter", default-features = false, features = ["aec", "transcribe"] }
+```
+
+Each processing stage is a cargo feature — `aec`, `transcribe`, `diarize` — so
+an app pays only for the ones it uses. Telemetry is off in the library unless a
+build asks for it, and a host app should leave it that way: it would report into
+Jotter's own PostHog project, as Jotter. The crate documentation at the top of
+[`crates/jotter/src/lib.rs`](crates/jotter/src/lib.rs) walks through record →
+finish → read transcript.
 
 ## How accurate is it?
 
@@ -86,7 +173,7 @@ beside anyone else's:
 
 ```bash
 benchmarks/bootstrap.sh
-cargo build --release --features bench
+cargo build --release -p jotter-cli --features bench
 benchmarks/bench score --corpus librispeech-test-clean
 ```
 
