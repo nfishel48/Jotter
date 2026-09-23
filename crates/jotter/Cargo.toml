@@ -7,11 +7,7 @@ description = "Local meeting capture: your microphone and everyone else's audio 
 readme = "../../README.md"
 keywords = ["audio", "recording", "transcription", "meetings", "diarization"]
 categories = ["multimedia::audio"]
-# No `license` yet, deliberately: the repository has not chosen one, and a
-# licence is the owner's decision rather than a packaging detail. `cargo
-# publish` refuses a crate without it, so this cannot slip onto crates.io
-# unlicensed — pick one here (and add the LICENSE file) before the first
-# release there.
+license.workspace = true
 
 [features]
 # What a host application gets from a plain dependency: every offline pass, and

@@ -140,20 +140,27 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Debian 12 rather than the runner's Ubuntu: a binary needs at least the glibc
+  # it was linked against, and built on ubuntu-latest (glibc 2.39) it would not
+  # start on Debian 12 (2.36), the oldest release Jotter supports. See
+  # scripts/linux_release_deps.sh, which is also what
+  # `scripts/check_linux_build.sh package` runs to reproduce this job locally.
   build-linux:
     name: Build Linux (x86_64)
     needs: version
     runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-ubuntu-latest
+          key: release-linux-bookworm
 
       # See ci.yml: rust-cache empties this directory but keeps the build
       # script's record of it.
@@ -165,18 +172,8 @@ jobs:
               -prune -exec rm -rf {} +
           fi
 
-      # Mirrors ci.yml. cmake is for aws-lc-sys, which builds a C crypto library
-      # and arrives via posthog-rs -> reqwest -> rustls; liblzma-dev is for
-      # sherpa-onnx-sys's build script (zip -> xz2 -> lzma-sys) — see ci.yml
-      # for why it must be installed even though lzma-sys can bundle its own.
       - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config clang libclang-dev cmake \
-            meson ninja-build \
-            libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev liblzma-dev
+        run: scripts/linux_release_deps.sh
 
       - name: Apply the version bump
         env:
@@ -191,25 +188,72 @@ jobs:
 
       - name: Build Linux binary
         env:
-          VERSION: ${{ needs.version.outputs.version }}
           # See the macOS build for why this is a variable rather than a secret.
           JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
-        run: |
-          set -euo pipefail
-          cargo build --release --locked -p jotter-cli --bin jotter
+        run: cargo build --release --locked -p jotter-cli --bin jotter
 
-          STAGE="jotter-$VERSION-linux-x86_64"
-          mkdir -p "$STAGE"
-          cp target/release/jotter "$STAGE/"
-          cp docs/AUDIO_CAPTURE.md "$STAGE/README.md"
-          tar -czf "jotter-linux-x86_64.tar.gz" "$STAGE"
+      # The tarball, the .deb and the .rpm, all around the one binary built
+      # above, with their final file names.
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: scripts/package_linux.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: jotter-linux-x86_64
-          path: jotter-linux-x86_64.tar.gz
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
+
+  # Install the packages on each distribution they claim to support, before
+  # anything is tagged. What this catches is a dependency that does not exist
+  # under that name there (the t64 renames) or a library the binary needs that
+  # nothing pulls in — `ldd` reporting "not found". It cannot catch a capture
+  # regression: containers have no PipeWire session.
+  install-test:
+    name: Install test (${{ matrix.image }})
+    needs: [version, build-linux]
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13", "ubuntu:24.04", "fedora:latest"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jotter-linux-x86_64
+          path: dist
+
+      - name: Install the package
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            apt-get install -y ./dist/*.deb
+          else
+            dnf install -y ./dist/*.rpm
+          fi
+
+      - name: Run it
+        env:
+          EXPECT: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ldd /usr/bin/jotter | grep 'not found'; then
+            echo "::error::a library jotter links is not installed by the package"
+            exit 1
+          fi
+          REPORTED="$(jotter --version 2>/dev/null)"
+          [ "$REPORTED" = "jotter $EXPECT" ] || {
+            echo "::error::jotter --version printed '$REPORTED', expected 'jotter $EXPECT'"
+            exit 1
+          }
+          jotter --help >/dev/null
 
   # The tag is cut here and nowhere else. Everything above builds from an
   # untagged tree, so a build that fails costs a re-run rather than a version
@@ -217,7 +261,7 @@ jobs:
   # failed the number was spent on a release that does not exist.
   publish:
     name: Tag and publish
-    needs: [version, build-macos, build-linux]
+    needs: [version, build-macos, build-linux, install-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -275,10 +319,10 @@ jobs:
           set -euo pipefail
           ls -la dist
 
-          # Renamed here rather than in the build jobs so the version appears
+          # Renamed here rather than in the build job so the version appears
           # in the downloaded filename without threading it through artifacts.
+          # The Linux files are named by scripts/package_linux.sh already.
           mv dist/Jotter-macos-arm64.zip "dist/Jotter-$VERSION-macos-arm64.zip"
-          mv dist/jotter-linux-x86_64.tar.gz "dist/jotter-$VERSION-linux-x86_64.tar.gz"
 
           cat > notes.md <<'EOF'
           Jotter is a command-line recorder: `jotter record` captures your
@@ -293,7 +337,6 @@ jobs:
           Apple Silicon only: Intel Macs are not supported.
 
           Download the `.zip`, unzip, and move `Jotter.app` to `/Applications`.
-
           The app is **ad-hoc signed, not notarized**, so Gatekeeper will refuse
           it on first launch. Clear the quarantine flag:
 
@@ -302,32 +345,45 @@ jobs:
           ```
 
           The bundle has no window; it exists because macOS will not grant
-          system-audio access to an executable with no bundle identity — it
-          feeds the capture digital silence instead of prompting. Run the
-          command through it, so the permission is attributed to the bundle:
+          system-audio access to an executable with no bundle identity. Put the
+          `jotter` inside it on your `PATH` and `jotter start` runs the recorder
+          through the bundle, so the permission is attributed to Jotter:
 
           ```
-          open -a Jotter --stdout /tmp/jotter.out --stderr /tmp/jotter.err \
-            --args record --duration 600
+          sudo mkdir -p /usr/local/bin
+          sudo ln -sf /Applications/Jotter.app/Contents/MacOS/jotter /usr/local/bin/jotter
           ```
 
           On first recording, approve **Microphone**, **Screen & System Audio
-          Recording**, and **Documents** access. Commands that touch no audio
-          device (`transcribe`, `diarize`, `models`, …) can run the binary
-          inside the bundle directly:
-          `/Applications/Jotter.app/Contents/MacOS/jotter`.
+          Recording**, and **Documents** access.
 
-          ### Linux (x86_64)
+          ### Debian 12+, Ubuntu 24.04+ (apt)
+
+          ```
+          sudo curl -fsSLo /usr/share/keyrings/jotter.asc https://nfishel48.github.io/Jotter/jotter.asc
+          sudo curl -fsSLo /etc/apt/sources.list.d/jotter.sources https://nfishel48.github.io/Jotter/jotter.sources
+          sudo apt update && sudo apt install jotter
+          ```
+
+          ### Fedora (dnf)
+
+          ```
+          sudo curl -fsSLo /etc/yum.repos.d/jotter.repo https://nfishel48.github.io/Jotter/jotter.repo
+          sudo dnf install jotter
+          ```
+
+          ### Linux, by hand
+
+          The `.deb` and `.rpm` below install directly, or unpack the tarball:
 
           ```
           tar -xzf jotter-VERSION-linux-x86_64.tar.gz
-          cd jotter-VERSION-linux-x86_64
-          ./jotter record --duration 600
+          ./jotter-VERSION-linux-x86_64/jotter record --duration 600
           ```
 
-          Needs a running **PipeWire** session — system-audio capture uses
-          PipeWire monitor capture and cannot work on the ALSA fallback. Runtime
-          libraries: `libpipewire-0.3`, `libasound2`.
+          Linux needs a running **PipeWire** session — system-audio capture uses
+          PipeWire monitor capture and cannot work on the ALSA fallback. x86_64
+          only.
 
           > Linux is **compile-verified only**. Capture has not been confirmed
           > against a live PipeWire session.
@@ -357,4 +413,177 @@ jobs:
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --notes-file notes.md \
-            dist/*.zip dist/*.tar.gz
+            dist/*.zip dist/*.tar.gz dist/*.deb dist/*.rpm
+
+  # The channels below run once the release exists, and each only repackages
+  # what `publish` released. A failure here leaves the GitHub release intact;
+  # re-run the failed job. Their secrets are listed in docs/CI_CD.md.
+  #
+  # publish-tap and publish-aur stay skipped until their repository variable
+  # (PUBLISH_HOMEBREW, PUBLISH_AUR) is set to `true`, which is the last step of
+  # setting each channel up. Until then a release is not marked failed for a
+  # channel that does not exist yet.
+
+  # The apt and dnf repositories on GitHub Pages, rebuilt from scratch from the
+  # last three releases' packages every time, so the site never grows.
+  publish-repos:
+    name: Publish apt and dnf repositories
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils createrepo-c rpm gnupg
+
+      - name: Import the signing key
+        env:
+          REPO_GPG_PRIVATE_KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$REPO_GPG_PRIVATE_KEY" ] || {
+            echo "::error::secret REPO_GPG_PRIVATE_KEY is not set; see docs/CI_CD.md"
+            exit 1
+          }
+          printf '%s\n' "$REPO_GPG_PRIVATE_KEY" | gpg --batch --import
+          FPR="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')"
+          echo "REPO_GPG_KEY_ID=$FPR" >> "$GITHUB_ENV"
+
+      - name: Fetch the last three releases' packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir packages
+          for tag in $(gh release list --limit 3 --json tagName -q '.[].tagName'); do
+            # Releases from before packaging have no .deb or .rpm to fetch.
+            gh release download "$tag" --dir packages --pattern '*.deb' --pattern '*.rpm' || true
+          done
+          ls -l packages
+
+      - name: Build the repositories
+        env:
+          REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: scripts/build_package_repo.sh packages site
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
+
+  # Formula/jotter.rb in <owner>/homebrew-tap, rendered from
+  # packaging/homebrew/jotter.rb. On macOS so the rendered formula is installed
+  # and tested before anyone else can get it.
+  publish-tap:
+    if: vars.PUBLISH_HOMEBREW == 'true'
+    name: Update the Homebrew tap
+    needs: [version, publish]
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAP: ${{ github.repository_owner }}/homebrew-tap
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Jotter-macos-arm64
+          path: dist
+
+      - name: Check out the tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$TAP_TOKEN" ] || {
+            echo "::error::secret HOMEBREW_TAP_TOKEN is not set; see docs/CI_CD.md"
+            exit 1
+          }
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/$TAP.git" tap
+
+      - name: Render the formula
+        run: |
+          set -euo pipefail
+          SHA="$(shasum -a 256 dist/Jotter-macos-arm64.zip | cut -d' ' -f1)"
+          mkdir -p tap/Formula
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$SHA/g" \
+            packaging/homebrew/jotter.rb > tap/Formula/jotter.rb
+
+      # Installed from a local tap, which is what a user's `brew install`
+      # evaluates too; the release asset it downloads is already public.
+      - name: Install and test the formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git local/jottertest
+          cp tap/Formula/jotter.rb "$(brew --repository local/jottertest)/Formula/"
+          brew install local/jottertest/jotter
+          brew test local/jottertest/jotter
+          codesign --verify --deep --strict "$(brew --prefix jotter)/Jotter.app"
+
+      - name: Push the formula
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/jotter.rb
+          # A re-run after a later step failed finds the formula already there.
+          if git diff --cached --quiet; then
+            echo "Formula/jotter.rb already at $VERSION"
+            exit 0
+          fi
+          git commit -m "jotter $VERSION"
+          git push origin HEAD
+
+  # jotter-bin on the AUR, from packaging/aur/PKGBUILD. The action computes
+  # the checksum from the published tarball, test-builds the package in an
+  # Arch container and regenerates .SRCINFO before pushing.
+  publish-aur:
+    if: vars.PUBLISH_AUR == 'true'
+    name: Update the AUR package
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Set the version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$AUR_SSH_PRIVATE_KEY" ] || {
+            echo "::error::secret AUR_SSH_PRIVATE_KEY is not set; see docs/CI_CD.md"
+            exit 1
+          }
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/aur/PKGBUILD
+
+      - uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: jotter-bin
+          pkgbuild: packaging/aur/PKGBUILD
+          updpkgsums: true
+          test: true
+          commit_username: Nathan Fishel
+          commit_email: nfishel@proton.me
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ needs.version.outputs.version }}

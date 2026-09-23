@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "jotter"
-version = "0.1.18"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "cpal",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "jotter-cli"
-version = "0.1.18"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
