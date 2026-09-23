@@ -1,7 +1,8 @@
 # Audio capture — status
 
 Captures your microphone and everyone else's audio as two separate WAV tracks,
-app-agnostically, via cpal. **Verified working end to end on macOS 26.3.1.**
+app-agnostically, via cpal. **Verified working end to end on macOS 26.3.1**
+(Apple Silicon — the only Mac architecture Jotter supports).
 
 ## Quick start
 

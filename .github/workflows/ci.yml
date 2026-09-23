@@ -31,13 +31,10 @@ jobs:
     strategy:
       fail-fast: false # a Linux-only break should not hide a macOS-only one
       matrix:
-        # Both macOS architectures, because release.yml ships a universal
-        # binary built from a native build of each. macos-latest is Apple
-        # Silicon; macos-15-intel is the Intel image (there is no
-        # macos-latest-intel). Without the Intel leg an x86_64-only break —
-        # the `aec` link failure that sank v0.1.7 was one — reaches main and
-        # surfaces during a release instead of on the pull request.
-        os: [ubuntu-latest, macos-latest, macos-15-intel]
+        # Apple Silicon is the only macOS Jotter supports — Intel Macs were
+        # dropped deliberately — so macos-latest is the one macOS leg, matching
+        # the arm64-only release build.
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4

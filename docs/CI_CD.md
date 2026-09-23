@@ -9,18 +9,25 @@ Runs on every push to any branch, on pull requests, and — via `workflow_call` 
 as the gate inside the release workflow, so "tests pass" means the same thing in
 both places.
 
-Matrix: `ubuntu-latest`, `macos-latest` (Apple Silicon) and `macos-15-intel`,
-`fail-fast: false` so a break on one platform cannot hide a break on another.
-Steps: `fmt --check`, `clippy`, `test`, `build` across the whole workspace, a
-build of the benchmark harness (Ubuntu only), and a feature-matrix `check`, all
-with `RUSTFLAGS: -D warnings`.
+Matrix: `ubuntu-latest` and `macos-latest` (Apple Silicon), `fail-fast: false`
+so a break on one platform cannot hide a break on another. Steps:
+`fmt --check`, `clippy`, `test`, `build` across the whole workspace, a build of
+the benchmark harness (Ubuntu only), and a feature-matrix `check`, all with
+`RUSTFLAGS: -D warnings`.
 
-Both macOS architectures are here because the release ships a universal binary
-built from a native build of each, and an x86_64-only break must fail on the
-pull request rather than during the release. See *Reproducing CI locally* below
-for why the cheaper thing that used to stand in for the Intel leg — a
-`cargo check --target x86_64-apple-darwin` on the Apple Silicon runner — proved
-nothing.
+There is no Intel macOS leg. Jotter supports Apple Silicon only — Intel Macs
+were dropped deliberately — so the one macOS runner is the architecture the
+release builds and ships.
+
+Two steps exist because of `Swatinem/rust-cache` rather than the code.
+*Reset the sherpa-onnx prebuilt cache* runs right after the restore:
+sherpa-onnx-sys unpacks its static libraries into `target/sherpa-onnx-prebuilt`,
+which is not a Cargo profile directory, so the cache's pruning empties it while
+keeping the build script's output that points there — and a later full build
+fails with `could not find native static library sherpa-onnx-c-api`. And
+`liblzma-dev` is installed on Linux because `lzma-sys`, under that same build
+script, links the system liblzma when pkg-config finds one and keeps that choice
+in the cache, so a runner without the package cannot link a restored build.
 
 The feature matrix exists because the optional stages are `cfg`'d out of one
 codebase, and code that only compiles with every feature on builds fine by
@@ -89,8 +96,8 @@ Silicon runner, on the reasoning that `check` still runs build scripts and so
 still compiles the C++. It does — but `aec`'s bundled WebRTC/abseil build is not
 target-aware and compiled that C++ for the *host*, and only the link `check`
 skips would have noticed. v0.1.7 passed CI, then failed in the release with
-every `webrtc::` symbol undefined for x86_64. The guard is gone; a real native
-build on each architecture replaces it.
+every `webrtc::` symbol undefined for x86_64. The guard is gone, and so is the
+Intel build it guarded: macOS releases are Apple Silicon only, built natively.
 
 ## Release — `.github/workflows/release.yml`
 
@@ -99,12 +106,9 @@ Triggered by a push to `main`:
 ```mermaid
 flowchart LR
     T["test<br/><i>calls ci.yml</i>"] --> V["version<br/>work out the number"]
-    V --> MA["build-macos<br/>arm64 · native"]
-    V --> MI["build-macos<br/>x86_64 · native"]
+    V --> M["build-macos<br/>arm64 · native<br/>.app + zip"]
     V --> L["build-linux<br/>x86_64"]
-    MA --> P["package-macos<br/>lipo + .app + zip"]
-    MI --> P
-    P --> R["publish<br/>commit + tag + push<br/>gh release create"]
+    M --> R["publish<br/>commit + tag + push<br/>gh release create"]
     L --> R
 ```
 
@@ -115,11 +119,10 @@ flowchart LR
 3. **build-macos** / **build-linux** — check out that SHA, re-apply the same
    bump to the working tree (so the binary reports the version about to be
    tagged) and build only the shipped binary, with
-   `cargo build --release --locked -p jotter-cli --bin jotter` (plus `--target`
-   where the job names one). Nothing is committed here either.
-4. **package-macos** — `lipo`s the two native macOS binaries into one universal
-   binary, wraps it with `bundle.sh` and zips the `.app`.
-5. **publish** — re-applies the bump, commits, tags `vX.Y.Z`, pushes, and
+   `cargo build --release --locked -p jotter-cli --bin jotter`. The macOS job
+   then asserts the binary is arm64, wraps it with `bundle.sh` and zips the
+   `.app`. Nothing is committed here either.
+4. **publish** — re-applies the bump, commits, tags `vX.Y.Z`, pushes, and
    publishes with `gh release create`.
 
 `concurrency: release` with `cancel-in-progress: false` — two runs would race on
@@ -143,29 +146,25 @@ anything else landed on `main` while the builds ran, the push is rejected and
 the release fails *before* tagging, rather than pointing a tag at source the
 binaries were not built from.
 
-### One runner per macOS architecture
+### macOS: Apple Silicon only, built natively
 
-The two macOS halves are built on runners of their own architecture —
-`macos-latest` for arm64, `macos-15-intel` for x86_64 — and joined by `lipo` in
-a third job.
+The macOS build runs on `macos-latest`, an Apple Silicon runner, and produces
+an arm64 binary and nothing else. Intel Macs are not supported: that was a
+deliberate choice, not an omission, and there is no universal binary.
 
-Cross-building both from the Apple Silicon runner is what broke v0.1.7. The
+Native rather than cross-built for a reason that predates the decision.
+Cross-building x86_64 from the Apple Silicon runner is what broke v0.1.7: the
 `aec` feature builds WebRTC's `AudioProcessing` and abseil from C++ source with
 meson, and that build compiles for the host no matter what `--target` says. The
 x86_64 rlib ended up full of arm64 objects, `ld` discarded every one of them
 (`found architecture 'arm64', required architecture 'x86_64'`) and the link
-failed on undefined `webrtc::` symbols.
+failed on undefined `webrtc::` symbols. The sherpa-onnx build script has the
+same property — it picks its prebuilt archive (`osx-arm64`, `linux-x64`) by
+host — so a native build is the only kind that is right without being told.
 
-Each build step asserts its output's architecture with `lipo -info` rather than
-trusting the runner label, and `package-macos` asserts that the joined binary
-really contains both slices. `bundle.sh` takes `VERSION` from the environment
-when set, since the packaging job never applies the bump to its own checkout.
-
-Native-per-architecture also happens to be what `transcribe` wants. The
-sherpa-onnx build script picks a prebuilt static archive by host target
-(`osx-arm64`, `osx-x64`, `linux-x64`), so each leg gets the right one without
-being told — but a cross-build would silently fetch the runner's architecture,
-the same class of failure as v0.1.7.
+The build step still asserts `arm64` with `lipo -info` rather than trusting the
+runner label, so a relabelled image cannot ship an Intel binary under an arm64
+name.
 
 ### The build now needs network access
 
@@ -205,18 +204,15 @@ workflow runs. The `[skip ci]` in the commit message is belt-and-braces.
 
 | Platform | Artifact | Notes |
 | --- | --- | --- |
-| macOS | `Jotter-X.Y.Z-macos-universal.zip` | `Jotter.app`, universal via `lipo` |
+| macOS | `Jotter-X.Y.Z-macos-arm64.zip` | `Jotter.app`, Apple Silicon only |
 | Linux | `jotter-X.Y.Z-linux-x86_64.tar.gz` | the `jotter` command-line binary |
 
 **macOS ships the `.app`, not a bare binary** — and this is not cosmetic. macOS
 will not grant system-audio access to an executable with no bundle identity; it
 feeds the capture digital silence instead of prompting. A released bare binary
 would look like it worked and record nothing. `bundle.sh` reports the version CI
-is tagging — from `$VERSION` when the workflow sets it, from the workspace
-`Cargo.toml` otherwise.
-
-A universal binary rather than two downloads, so users never have to work out
-which Mac they have.
+is tagging — the release job applies the bump to its own checkout before
+packaging, and an explicit `$VERSION` wins when set.
 
 The release notes describe a command-line tool. On macOS that means running
 `jotter` through the bundle — `open -a Jotter.app --args record …` — so the
@@ -243,8 +239,8 @@ distribution would require `com.apple.security.network.client`.
 
 - **Not notarized.** The bundle is ad-hoc signed, because there are no signing
   identities on this machine. Gatekeeper will block it on first launch;
-  the release notes tell users to right-click → Open or clear the quarantine
-  attribute. Proper notarization needs a paid Apple Developer account and
+  the release notes tell users to clear the quarantine attribute. Proper
+  notarization needs a paid Apple Developer account and
   `APPLE_ID` / `APPLE_TEAM_ID` / app-specific-password secrets.
 - **Linux is compile-verified only** — no runtime confirmation against a live
   PipeWire session. The release notes say so.
@@ -252,10 +248,9 @@ distribution would require `com.apple.security.network.client`.
   well-trodden, but nothing has exercised it.
 - **If `main` is a protected branch**, the bot's push will be rejected. Either
   allow `github-actions[bot]` to bypass, or move the bump to a PR.
-- **The x86_64 macOS build depends on a hosted Intel image.** `macos-15-intel`
-  is the current one; Apple Silicon is where the images are going, and when the
-  Intel line is retired the universal build needs another answer — a working
-  cross-build of the bundled C++, or dropping to arm64-only.
+- **No Intel Mac build**, by decision. Supporting it again would need either a
+  hosted Intel runner or a cross-build of the bundled C++ that actually targets
+  x86_64 — see the v0.1.7 note above.
 - The release gate proves the code compiles and the logic tests pass. It cannot
   prove audio capture still works — that needs `scripts/check_audio.sh` on real
   hardware.

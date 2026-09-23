@@ -28,9 +28,9 @@ EXEC="jotter"
 PROFILE="${PROFILE:-debug}"
 BUNDLE_ID="com.nfishel.jotter"
 # Read from Cargo.toml rather than hardcoded, so released bundles report the
-# version CI actually tagged. CI overrides it: the packaging job assembles the
-# .app from binaries built elsewhere and never applies the version bump to its
-# own checkout, so its Cargo.toml still reads the previous version.
+# version CI actually tagged — the release job applies the bump to its own
+# checkout before packaging. An explicit VERSION wins, for packaging a binary
+# built from some other checkout.
 VERSION="${VERSION:-$("$(dirname "${BASH_SOURCE[0]}")/bump_version.sh" --current)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Deliberately not under target/: `cargo clean` would wipe the bundle, and TCC
@@ -39,9 +39,9 @@ APP="$ROOT/build/Jotter.app"
 
 cd "$ROOT"
 
-# SKIP_BUILD lets CI drop in a universal binary (lipo of arm64 + x86_64) at
-# target/$PROFILE/ first — building here would overwrite it with a single-arch
-# one.
+# SKIP_BUILD packages the binary already at target/$PROFILE/ — in CI, the one
+# the release job built with `--locked` and its telemetry key — rather than
+# rebuilding it here with neither.
 if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
   echo "==> using existing binary in target/$PROFILE"
 else

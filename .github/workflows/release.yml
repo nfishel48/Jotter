@@ -58,28 +58,16 @@ jobs:
           # describing different source.
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  # One runner per architecture, deliberately: `aec` builds WebRTC's
-  # AudioProcessing (and abseil) from C++ source with meson, and that build is
-  # not target-aware — on an Apple Silicon runner it compiles for the host
-  # whatever `--target` says. Cross-building x86_64 that way put arm64 objects
-  # inside the x86_64 rlib, the linker discarded every one of them, and the
-  # release failed on undefined `webrtc::` symbols after the tag was already
-  # pushed (v0.1.7). `lipo` in `package-macos` joins the two native builds.
+  # Apple Silicon only, by decision: Intel Macs are not supported, so there is
+  # one native arm64 build and no universal binary to assemble. Native rather
+  # than cross-built for a reason that outlives the Intel leg — `aec` builds
+  # WebRTC's AudioProcessing (and abseil) from C++ source with meson, and that
+  # build compiles for the host whatever `--target` says. Cross-building
+  # x86_64 that way is what sank v0.1.7.
   build-macos:
-    name: Build macOS (${{ matrix.arch }})
+    name: Build macOS (arm64)
     needs: version
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest # Apple Silicon
-            arch: arm64
-            target: aarch64-apple-darwin
-          - os: macos-15-intel # the Intel image; there is no macos-latest-intel
-            arch: x86_64
-            target: x86_64-apple-darwin
-
+    runs-on: macos-latest # Apple Silicon
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +77,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-macos-arm64
 
       # See ci.yml: rust-cache empties this directory but keeps the build
       # script's record of it.
@@ -119,10 +107,8 @@ jobs:
             exit 1
           }
 
-      - name: Build
+      - name: Build and package the .app
         env:
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
           # A repo *variable*, not a secret. PostHog project tokens are
           # write-only and public by design — every site running PostHog serves
           # one in its page source — so there is nothing to protect, and a
@@ -131,75 +117,26 @@ jobs:
           JOTTER_POSTHOG_KEY: ${{ vars.JOTTER_POSTHOG_KEY }}
         run: |
           set -euo pipefail
-          cargo build --release --locked -p jotter-cli --bin jotter --target "$TARGET"
+          cargo build --release --locked -p jotter-cli --bin jotter
 
-          # Assert the architecture rather than trust the runner label: if an
-          # image were relabelled, two arm64 halves would otherwise reach
-          # `lipo` and only the missing x86_64 slice would give it away.
-          BIN="target/$TARGET/release/jotter"
-          lipo -info "$BIN"
-          lipo -info "$BIN" | grep -q "$ARCH" || {
-            echo "::error::$BIN is not $ARCH"
+          # Assert the architecture rather than trust the runner label: a
+          # relabelled image would otherwise ship an Intel binary as arm64.
+          lipo -info target/release/jotter
+          lipo -info target/release/jotter | grep -q arm64 || {
+            echo "::error::target/release/jotter is not arm64"
             exit 1
           }
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jotter-macos-${{ matrix.arch }}
-          path: target/${{ matrix.target }}/release/jotter
-          if-no-files-found: error
-          # An input to package-macos, not something anyone downloads.
-          retention-days: 1
-
-  # One download that runs on both Apple Silicon and Intel, rather than making
-  # users work out which they have.
-  package-macos:
-    name: Package macOS universal .app
-    needs: [version, build-macos]
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.version.outputs.sha }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: jotter-macos-*
-          path: arch-bins
-
-      - name: Assemble the universal .app
-        env:
-          # bundle.sh reads this rather than Cargo.toml, so this job needs no
-          # Rust toolchain and no bump of its own.
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p target/release
-          lipo -create \
-            "arch-bins/jotter-macos-arm64/jotter" \
-            "arch-bins/jotter-macos-x86_64/jotter" \
-            -output "target/release/jotter"
-          # Artifacts do not preserve the executable bit.
-          chmod +x target/release/jotter
-
-          lipo -info target/release/jotter
-          for arch in arm64 x86_64; do
-            lipo -info target/release/jotter | grep -q "$arch" || {
-              echo "::error::universal binary is missing $arch"
-              exit 1
-            }
-          done
 
           # The .app is the shippable unit, not the bare binary: macOS will not
           # grant system-audio access to an executable with no bundle identity.
           SKIP_BUILD=1 PROFILE=release ./scripts/bundle.sh
 
-          ditto -c -k --keepParent build/Jotter.app "Jotter-macos-universal.zip"
+          ditto -c -k --keepParent build/Jotter.app "Jotter-macos-arm64.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Jotter-macos-universal
-          path: Jotter-macos-universal.zip
+          name: Jotter-macos-arm64
+          path: Jotter-macos-arm64.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -280,7 +217,7 @@ jobs:
   # failed the number was spent on a release that does not exist.
   publish:
     name: Tag and publish
-    needs: [version, package-macos, build-linux]
+    needs: [version, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -291,12 +228,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Named explicitly: the per-architecture binaries are also artifacts of
-      # this run and both are called `jotter`, so a merged download would
-      # collide.
+      # Named explicitly rather than merged, so nothing else a job uploads can
+      # land in `dist/` and be published by the glob below.
       - uses: actions/download-artifact@v4
         with:
-          name: Jotter-macos-universal
+          name: Jotter-macos-arm64
           path: dist
 
       - uses: actions/download-artifact@v4
@@ -341,7 +277,7 @@ jobs:
 
           # Renamed here rather than in the build jobs so the version appears
           # in the downloaded filename without threading it through artifacts.
-          mv dist/Jotter-macos-universal.zip "dist/Jotter-$VERSION-macos-universal.zip"
+          mv dist/Jotter-macos-arm64.zip "dist/Jotter-$VERSION-macos-arm64.zip"
           mv dist/jotter-linux-x86_64.tar.gz "dist/jotter-$VERSION-linux-x86_64.tar.gz"
 
           cat > notes.md <<'EOF'
@@ -352,7 +288,9 @@ jobs:
 
           ## Install
 
-          ### macOS (Apple Silicon and Intel)
+          ### macOS (Apple Silicon)
+
+          Apple Silicon only: Intel Macs are not supported.
 
           Download the `.zip`, unzip, and move `Jotter.app` to `/Applications`.
 

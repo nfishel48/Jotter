@@ -13,6 +13,10 @@
 ## Using Jotter
 Jotter tries to be simple for less technical users to use and still get the advantages of local only transcription and semantic search while still be less opinionated then then other tools and allowing those who want to change things.
 
+Runs on macOS on Apple Silicon and on Linux x86_64 (PipeWire; compile-verified
+so far). Intel Macs are deliberately not supported, and releases ship an arm64
+`Jotter.app` only.
+
 ## Getting a transcript
 
 Transcription needs a speech model, which is too large to ship inside the binary. Fetch it once:
