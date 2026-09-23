@@ -362,8 +362,8 @@ impl From<aec::AecError> for ProcessError {
 /// Runs the pass over a recording directory.
 ///
 /// Takes a path and opens its own files, holding no cpal types, so it is
-/// `Send` and the GUI can run it on a worker thread — `RecordingHandle::stop`
-/// is called from the egui thread and must not block for seconds.
+/// `Send` and can run on any thread — or in another process from the one that
+/// recorded. `RecordingHandle::stop` never waits on it.
 pub fn run(dir: &Path, options: ProcessOptions) -> Result<AecReport, ProcessError> {
     let meta_path = dir.join("meta.json");
     let meta = Meta::read(&meta_path)?;

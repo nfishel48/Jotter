@@ -22,19 +22,6 @@ pub const RECORDING_DIARIZED: &str = "recording_diarized";
 pub const DEVICES_REFRESHED: &str = "devices_refreshed";
 pub const DEVICE_LIST_FAILED: &str = "device_list_failed";
 
-pub const SETTINGS_OPENED: &str = "settings_opened";
-pub const TRAY_MENU_CLICKED: &str = "tray_menu_clicked";
-pub const RECORDINGS_FOLDER_OPENED: &str = "recordings_folder_opened";
-
-pub const TELEMETRY_OPTED_IN: &str = "telemetry_opted_in";
-pub const TELEMETRY_OPTED_OUT: &str = "telemetry_opted_out";
-
-/// The one feature flag the app ships with.
-///
-/// Lets ingestion be stopped for a release that turns out to be noisy or to
-/// capture something it shouldn't, without waiting for users to update.
-pub const FLAG_KILL_SWITCH: &str = "telemetry-kill-switch";
-
 /// Properties attached to every event, describing the build rather than the user.
 ///
 /// The `$`-prefixed names are PostHog reserved properties, so they populate the
@@ -63,17 +50,24 @@ fn os_display_name() -> &'static str {
     }
 }
 
-/// Which front ends this binary was built with.
+/// Which offline passes this binary was built with.
 ///
-/// Worth recording because the three configurations fail differently, and a bug
-/// report that says "the tray doesn't appear" means something very different
-/// from a CLI-only build.
+/// Worth recording because each one is a feature a packager can turn off, and
+/// a missing `recording_transcribed` means something very different from a
+/// build that has no transcription stage to send it. `diarize` implies
+/// `transcribe`, so the combinations below are all there are.
 pub fn build_features() -> &'static str {
-    match (cfg!(feature = "gui"), cfg!(feature = "cli")) {
-        (true, true) => "gui+cli",
-        (true, false) => "gui",
-        (false, true) => "cli",
-        (false, false) => "none",
+    match (
+        cfg!(feature = "aec"),
+        cfg!(feature = "transcribe"),
+        cfg!(feature = "diarize"),
+    ) {
+        (true, true, true) => "aec+transcribe+diarize",
+        (true, true, false) => "aec+transcribe",
+        (true, false, _) => "aec",
+        (false, true, true) => "transcribe+diarize",
+        (false, true, false) => "transcribe",
+        (false, false, _) => "none",
     }
 }
 
@@ -415,11 +409,6 @@ mod tests {
             RECORDING_DIARIZED,
             DEVICES_REFRESHED,
             DEVICE_LIST_FAILED,
-            SETTINGS_OPENED,
-            TRAY_MENU_CLICKED,
-            RECORDINGS_FOLDER_OPENED,
-            TELEMETRY_OPTED_IN,
-            TELEMETRY_OPTED_OUT,
         ] {
             assert!(
                 name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
@@ -591,7 +580,7 @@ mod tests {
 
     #[test]
     fn context_carries_no_user_identifying_values() {
-        let props = context(crate::telemetry::Surface::Gui);
+        let props = context(crate::telemetry::Surface::Cli);
         let rendered = format!("{props:?}");
 
         // Everything in `context` must describe the build or the platform. If a

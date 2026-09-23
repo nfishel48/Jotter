@@ -13,6 +13,9 @@ pub mod devices;
 #[cfg(feature = "diarize")]
 pub mod diarize;
 pub mod meta;
+// Private, re-exported below: `audio::finish` is the name callers should use,
+// and a public `pipeline` module would be a second path to the same items.
+mod pipeline;
 #[cfg(feature = "aec")]
 pub mod process;
 // Ungated on purpose, unlike the passes built on it: the shared stage
@@ -24,6 +27,11 @@ pub mod transcribe;
 // are different jobs, and only the second needs the inference stack.
 pub mod transcript;
 pub mod writer;
+
+pub use pipeline::{
+    FinishOptions, FinishProgressFn, FinishReport, FinishStage, Skip, StageOutcome, finish,
+    finish_with_progress,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -146,9 +154,9 @@ impl RecordingHandle {
             ended_at: meta::to_unix_secs(SystemTime::now()),
             mic,
             system,
-            // Filled in later by the offline passes, which run off this thread.
-            // `stop()` stays as fast as it is today because the GUI calls it
-            // from the egui thread.
+            // Filled in afterwards by `finish`, not here: `stop()` only
+            // finalises the audio, so a caller that needs the devices released
+            // promptly is never held up by minutes of transcription.
             aec: None,
             transcript: None,
             diarization: None,

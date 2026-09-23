@@ -37,5 +37,5 @@ def cargo_binary(name: str = "jotter-bench") -> Path:
             return candidate
     raise FileNotFoundError(
         f"{name} is not built. From {REPO}:\n"
-        f"  cargo build --release --features bench"
+        f"  cargo build --release -p jotter-cli --features bench"
     )

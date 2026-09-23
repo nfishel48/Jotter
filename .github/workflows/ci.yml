@@ -31,13 +31,10 @@ jobs:
     strategy:
       fail-fast: false # a Linux-only break should not hide a macOS-only one
       matrix:
-        # Both macOS architectures, because release.yml ships a universal
-        # binary built from a native build of each. macos-latest is Apple
-        # Silicon; macos-15-intel is the Intel image (there is no
-        # macos-latest-intel). Without the Intel leg an x86_64-only break —
-        # the `aec` link failure that sank v0.1.7 was one — reaches main and
-        # surfaces during a release instead of on the pull request.
-        os: [ubuntu-latest, macos-latest, macos-15-intel]
+        # Apple Silicon is the only macOS Jotter supports — Intel Macs were
+        # dropped deliberately — so macos-latest is the one macOS leg, matching
+        # the arm64-only release build.
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +47,23 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # sherpa-onnx-sys unpacks its prebuilt static libraries into
+      # target/sherpa-onnx-prebuilt, which is not a Cargo profile directory,
+      # so rust-cache's pruning deletes every *file* under it and keeps the
+      # directories. The restored build-script output still points there, and
+      # the empty `lib/` also passes the script's own "already downloaded"
+      # check — so any build that links it fails with "could not find native
+      # static library `sherpa-onnx-c-api`". Dropping the directory and the
+      # script's cached run makes it download and unpack again.
+      - name: Reset the sherpa-onnx prebuilt cache
+        shell: bash
+        run: |
+          rm -rf target/sherpa-onnx-prebuilt
+          if [ -d target ]; then
+            find target -type d \( -path '*/build/sherpa-onnx-sys-*' -o -path '*/.fingerprint/sherpa-onnx-sys-*' \) \
+              -prune -exec rm -rf {} +
+          fi
+
       # The `aec` feature builds WebRTC's AudioProcessing from source, which is
       # an autotools/meson project. `bundled` is deliberate: linking a system
       # libwebrtc-audio-processing would make the build depend on a package most
@@ -59,11 +73,18 @@ jobs:
         run: brew install pkg-config meson ninja
 
       # Needed to *compile* on Linux, not to run: the pipewire/alsa -sys crates
-      # need real headers, and eframe + tray-icon pull in gtk/x11/wayland.
+      # need real headers, and `aec` builds WebRTC's C++ with meson.
       #
       # cmake is for aws-lc-sys, which builds a C crypto library and arrives via
       # posthog-rs -> reqwest -> rustls. GitHub's image happens to ship it, but
       # depending on that implicitly is how a release breaks on an image bump.
+      #
+      # liblzma-dev is for sherpa-onnx-sys's *build script*, which unpacks its
+      # prebuilt archive via zip -> xz2 -> lzma-sys. lzma-sys links the system
+      # liblzma when pkg-config finds one and compiles its own copy otherwise,
+      # and never revisits that choice — so a target dir cached while the old
+      # GUI toolkit's headers happened to pull liblzma-dev in fails to link
+      # without it. Installing it explicitly makes the cached choice hold.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -72,30 +93,24 @@ jobs:
             pkg-config clang libclang-dev cmake \
             meson ninja-build \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libasound2-dev \
-            libgtk-3-dev libayatana-appindicator3-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+            libasound2-dev liblzma-dev
 
       - name: Format
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked
 
       # Runners are headless with no audio devices, so the suite deliberately
       # covers only pure logic — conversion, downmix, the loopback duplex
       # guard, metadata. Anything touching cpal device enumeration would be
       # flaky here and belongs in scripts/check_audio.sh instead.
       - name: Test
-        run: cargo test --all-targets --locked
+        run: cargo test --workspace --all-targets --locked
 
       - name: Build
-        run: cargo build --locked
+        run: cargo build --workspace --locked
 
-      # The GUI and the CLI are cfg'd halves of one binary, so a change that
-      # only compiles with both features on is easy to miss. RUSTFLAGS above
-      # makes an import that is unused under one feature a hard failure here.
       # The benchmark harness. Linux only: it is the same Python everywhere and
       # paying for it three times buys nothing.
       #
@@ -110,30 +125,40 @@ jobs:
       - name: Benchmark harness
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --locked --features bench
+          cargo build --locked -p jotter-cli --features bench
           ./benchmarks/bootstrap.sh
           ./benchmarks/.venv/bin/python -m unittest discover -s benchmarks/tests -t benchmarks -v
           ./benchmarks/bench smoke
 
+      # Every stage is its own feature in the library and the CLI forwards
+      # each one, so a change that only compiles with all of them on is easy to
+      # miss. RUSTFLAGS above makes an import that is unused under one
+      # combination a hard failure here. `-p` matters: features are selected
+      # per package, and a bare `--no-default-features` at the workspace root
+      # would build neither crate the way anyone depends on it.
       - name: Build (feature matrix)
         run: |
-          cargo check --locked --no-default-features --features cli
-          cargo check --locked --no-default-features --features gui
+          # The library exactly as a host application gets it from a plain
+          # dependency: every stage, no telemetry.
+          cargo check --locked -p jotter
+          # Capture alone. A host that only records must not need meson, a C++
+          # toolchain, an ONNX runtime or any network code, and the only way
+          # that stays true is by checking it.
+          cargo check --locked -p jotter --no-default-features
           # `telemetry` has a no-op shim so that no call site needs a cfg, which
           # means the shim's signatures can drift from the real ones without
           # anything noticing until a packager builds without it. Both halves
-          # get checked against both front ends.
-          cargo check --locked --no-default-features --features cli,telemetry
-          cargo check --locked --no-default-features --features gui,telemetry
-          cargo check --locked --no-default-features --features gui,cli
-          # `aec` builds WebRTC's AudioProcessing from source. The leg that
-          # matters most is the one *without* it: a distro or fork that turns
-          # `aec` off must not need meson, ninja or a C++ toolchain at all, and
-          # the only way that stays true is by checking it.
-          cargo check --locked --no-default-features --features cli,aec
-          cargo check --locked --no-default-features --features gui,aec
+          # get checked, in the library and through the command.
+          cargo check --locked -p jotter --no-default-features --features telemetry
+          cargo check --locked -p jotter-cli --no-default-features
+          cargo check --locked -p jotter-cli --no-default-features --features telemetry
+          # `aec` alone, through the command: a distro or fork that turns
+          # transcription off must still get a working echo pass.
+          cargo check --locked -p jotter-cli --no-default-features --features aec
           # `bench` builds the benchmark driver in `benchmarks/`. It is off by
           # default and never shipped, which is exactly why it needs checking:
-          # nothing else in this matrix compiles `src/bin/bench.rs`, so it
-          # would rot silently until someone next tried to measure something.
-          cargo check --locked --no-default-features --features bench
+          # nothing else in this matrix compiles `crates/jotter-cli/src/bin/bench.rs`,
+          # so it would rot silently until someone next tried to measure
+          # something. It is also the one leg with `transcribe` but no
+          # `diarize`.
+          cargo check --locked -p jotter-cli --no-default-features --features bench

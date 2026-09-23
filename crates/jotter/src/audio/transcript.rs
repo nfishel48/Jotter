@@ -119,9 +119,9 @@ impl Transcript {
         self.segments.iter().filter(|s| s.track == track).count() as u32
     }
 
-    /// Writes through a temporary sibling, like every other artifact: the tray's
-    /// Quit calls `process::exit(0)`, and half a JSON file is no better than
-    /// half a WAV.
+    /// Writes through a temporary sibling, like every other artifact: the
+    /// process can be killed at any moment, and half a JSON file is no better
+    /// than half a WAV.
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
         write_atomic(path, |tmp| {
             std::fs::write(tmp, serde_json::to_string_pretty(self)?)

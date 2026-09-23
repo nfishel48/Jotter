@@ -335,8 +335,9 @@ impl Meta {
 /// Folder name for a new recording, e.g. `2026-09-15_14-32-08`.
 ///
 /// Local time, and zero-padded so lexical order matches chronological order.
-/// Lives here rather than in either front end so the GUI and the CLI cannot
-/// drift apart on the layout of a recordings directory.
+/// Lives in the library rather than a front end so everything that creates a
+/// recording directory — the command, a host application — names it the same
+/// way.
 pub fn timestamp_dir_name() -> String {
     chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
 }

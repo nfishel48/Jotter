@@ -1,12 +1,14 @@
-//! Persisted user preferences.
+//! Persisted user preferences, and where things live on disk.
 //!
 //! Deliberately separate from the recordings directory: those are documents the
 //! user goes looking for, this is state they should never have to see. The file
-//! is small and hand-edited often enough (it is the documented way to opt out
-//! without launching the GUI) that JSON beats a binary format.
+//! is small and hand-edited often enough (it is the documented way to change
+//! which passes run after a recording) that JSON beats a binary format.
 //!
-//! Compiled unconditionally — the CLI has to honour the same opt-out as the
-//! tray app, so this cannot live under `ui`.
+//! In the library rather than the command, because it is what
+//! [`crate::audio::FinishOptions::from_settings`] reads, and a host application
+//! that wants the same defaults as the `jotter` command should get them from
+//! the same file.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ pub struct Settings {
     /// rather than directly: an environment override can veto it without being
     /// written back here.
     pub telemetry_enabled: bool,
-    /// Whether the first-run telemetry notice has been dismissed.
+    /// Whether the first-run telemetry notice has been shown.
     pub telemetry_notice_seen: bool,
     /// Random per-install id, minted on first use by the telemetry module.
     ///
@@ -72,8 +74,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            // On by default, with a first-run notice in the settings pane and
-            // three documented ways out. See docs/TELEMETRY.md.
+            // On by default, with a one-time notice on the first run that
+            // sends anything and three documented ways out. See
+            // docs/TELEMETRY.md.
             telemetry_enabled: true,
             telemetry_notice_seen: false,
             install_id: None,
@@ -142,6 +145,17 @@ impl Settings {
         }
     }
 
+    /// [`Self::diarize_speakers`] as the diarization pass wants it.
+    ///
+    /// `0` is the settings file's way of saying "not set" — a `u8` with a
+    /// sentinel rather than an `Option`, because `Settings` is a flat serde
+    /// struct and a missing key already means default. The pass takes an
+    /// `Option`, where the absence is unambiguous, so the translation happens
+    /// once, here.
+    pub fn speaker_count(&self) -> Option<u8> {
+        (self.diarize_speakers > 0).then_some(self.diarize_speakers)
+    }
+
     /// Write the settings file, creating its directory if needed.
     pub fn save(&self) -> io::Result<()> {
         self.save_to(&path())
@@ -152,9 +166,10 @@ impl Settings {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Write-and-rename rather than write-in-place: the app can be killed at
-        // any moment (tray Quit calls `process::exit`), and a half-written file
-        // would silently reset every preference on next launch.
+        // Write-and-rename rather than write-in-place: the process can be
+        // killed at any moment (a closed terminal, a Ctrl-C mid-recording), and
+        // a half-written file would silently reset every preference on the
+        // next run.
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, path)
@@ -163,10 +178,35 @@ impl Settings {
 
 /// Location of the settings file.
 ///
-/// Must be absolute for the same reason `ui::recordings_root` must be: a macOS
+/// Must be absolute for the same reason [`recordings_root`] must be: a macOS
 /// bundle's working directory is `/`.
 pub fn path() -> PathBuf {
     dir().join("settings.json")
+}
+
+/// Where recordings are written: `~/Documents/Jotter`, one directory per
+/// recording beneath it.
+///
+/// Must be absolute: a macOS bundle's working directory is `/`, so a relative
+/// path would try to write to `/recordings` and fail.
+///
+/// On macOS, Documents is TCC-gated, so the first recording triggers a one-time
+/// "access files in your Documents folder" prompt. That is the deliberate trade
+/// for putting the files somewhere findable; if denied, creating the recording
+/// directory fails and `audio::start` returns the error. Linux has no such gate.
+pub fn recordings_root() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // Linux desktops let the user relocate or localise Documents, so honour
+    // XDG when it is set rather than assuming the English default exists.
+    let documents = std::env::var_os("XDG_DOCUMENTS_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join("Documents"));
+
+    documents.join("Jotter")
 }
 
 fn dir() -> PathBuf {
@@ -258,6 +298,16 @@ mod tests {
         assert!(settings.telemetry_enabled);
         assert!(!settings.telemetry_notice_seen);
         assert_eq!(settings.install_id, None);
+    }
+
+    /// `0` is how the file says "not set", and the pass must see that as a
+    /// missing count — which it declines on — never as a meeting of nobody.
+    #[test]
+    fn an_unset_speaker_count_is_none_not_zero() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.speaker_count(), None);
+        settings.diarize_speakers = 3;
+        assert_eq!(settings.speaker_count(), Some(3));
     }
 
     /// A named assertion rather than a bare default, so changing whether every

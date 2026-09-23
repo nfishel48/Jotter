@@ -378,7 +378,8 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(f32);
 /// Runs the pass over a recording directory.
 ///
 /// Takes a path and opens its own files, holding no cpal types, so it is `Send`
-/// and the GUI can run it on a worker thread.
+/// and can run on any thread — or in another process from the one that
+/// recorded.
 pub fn run(dir: &Path, options: TranscribeOptions) -> Result<TranscriptReport, TranscribeError> {
     run_with_progress(dir, options, &mut |_| {})
 }

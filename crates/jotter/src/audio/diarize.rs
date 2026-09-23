@@ -132,7 +132,7 @@ impl std::fmt::Display for DiarizeDecline {
             Self::NoSpeakerCount => write!(
                 f,
                 "nobody said how many people were on the call — pass `--speakers N`, \
-                 or set the number in the settings pane"
+                 or set `diarize_speakers` in settings.json"
             ),
             Self::NoSystemSpeech => write!(
                 f,
@@ -390,7 +390,8 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(f32);
 /// Runs the pass over a recording directory.
 ///
 /// Takes a path and opens its own files, holding no cpal types, so it is `Send`
-/// and the GUI can run it on a worker thread.
+/// and can run on any thread — or in another process from the one that
+/// recorded.
 pub fn run(dir: &Path, options: DiarizeOptions) -> Result<DiarizeReport, DiarizeError> {
     run_with_progress(dir, options, &mut |_| {})
 }

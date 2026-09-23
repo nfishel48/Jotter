@@ -1,21 +1,23 @@
 # Audio capture — status
 
 Captures your microphone and everyone else's audio as two separate WAV tracks,
-app-agnostically, via cpal. **Verified working end to end on macOS 26.3.1.**
+app-agnostically, via cpal. **Verified working end to end on macOS 26.3.1**
+(Apple Silicon — the only Mac architecture Jotter supports).
 
 ## Quick start
 
 ```sh
-scripts/run_app.sh                # build + bundle + launch the tray app
+scripts/run_app.sh                # build + bundle + run a bundled `jotter record`
 scripts/check_audio.sh            # CLI loop: tone → record → analyze (silent)
+scripts/check_audio.sh --bundled  # the same loop, recorded through Jotter.app
 scripts/check_audio.sh system     # isolate system audio
 scripts/check_audio.sh mic        # isolate microphone
 scripts/bundle.sh                 # rebuild build/Jotter.app
 ```
 
-One binary serves both front ends. `jotter` with no arguments opens the tray app
-— which is what LaunchServices does when it starts the bundle — and the
-subcommands are the CLI:
+Jotter is a command-line tool, and every capture goes through its subcommands.
+`jotter` with no arguments prints help and exits non-zero rather than guessing
+what you meant:
 
 ```sh
 jotter devices                                    # list devices and loopback flags
@@ -25,54 +27,36 @@ jotter record --system <id> --out /tmp/take1
 jotter --help
 ```
 
-Either half can be dropped at build time: `cargo build --no-default-features
---features cli` leaves out eframe/egui/tray-icon entirely, and `--features gui`
-leaves out clap.
+On macOS those commands have to run inside `Jotter.app` for system audio to be
+captured — see [below](#you-must-run-it-through-the-app-bundle).
+`scripts/run_app.sh` builds the bundle and runs a bundled `jotter record`,
+passing its arguments through.
 
-## The tray app
+The same capture code is available to other programs as the `jotter` library
+crate (`crates/jotter`); the CLI is a thin layer over it. A capture-only build —
+`cargo build -p jotter-cli --no-default-features` — leaves out the WebRTC C++
+build, the ONNX runtime and every network client.
 
-`scripts/run_app.sh` builds, bundles and launches it. The app has a Dock icon
-(`LSUIElement` is `false` in `scripts/bundle.sh`) and shows its window on
-launch; closing the window hides it rather than quitting, and the tray reopens
-it. The menu has **Start/Stop Recording**,
-**Settings** and **Quit**; the record item's label flips to reflect state, and
-left-clicking the icon opens the settings window.
+## Where recordings go
 
-Settings shows a record button with an elapsed timer, mic and system-audio
-device pickers (locked while recording, since a device cannot change underneath
-a live stream), and a per-track summary when a recording finishes.
-
-A recording survives closing the window. Both exit paths finalize it first —
-the tray's Quit calls `stop_recording` before `exit(0)`, and `App::on_exit`
-covers Cmd-Q, which bypasses the tray menu entirely. This matters more than it
-looks: an abandoned stream leaves a WAV whose RIFF header still holds a
-placeholder length, and many tools refuse to open it, so a whole meeting would
-be unreadable.
-
-Recordings go to `~/Documents/Jotter/2026-09-15_14-32-08/`. The path has to be
-absolute — a bundled app's working directory is `/`, so a relative path would
-try to write to `/recordings`. Folder names are local time, zero-padded so
-lexical order matches chronological order (`chrono` is a dependency for exactly
-this; deriving a DST-correct local offset by hand is a real bug surface).
+`jotter record` writes to `~/Documents/Jotter/2026-09-15_14-32-08/` unless
+`--out` says otherwise; the root comes from `jotter::config::recordings_root()`.
+The path has to be absolute — a bundled process's working directory is `/`, so
+a relative path would try to write to `/recordings`. Folder names are local
+time, zero-padded so lexical order matches chronological order (`chrono` is a
+dependency for exactly this; deriving a DST-correct local offset by hand is a
+real bug surface).
 
 Documents is TCC-gated, so the **first** recording triggers a one-time "access
 files in your Documents folder" prompt — hence `NSDocumentsFolderUsageDescription`
-in the plist. If it is denied, `create_dir_all` fails and the error shows in the
-settings pane rather than failing silently.
+in the plist. If it is denied, `create_dir_all` fails and `jotter record`
+reports the error rather than failing silently.
 
-The settings pane has an **Open recordings folder** button and makes the saved
-path of a finished recording a clickable link. Both create the directory before
-opening it, so the button still works before the first recording.
-
-Two eframe details this depends on:
-
-- Tray polling lives in `App::logic`, **not** `App::ui`. eframe 0.36 runs no
-  egui pass at all while the window is hidden and calls `logic` instead — so in
-  `ui` the tray menu would be dead exactly when it is the only interface the
-  user has.
-- `logic` only runs when a repaint is pending, so it re-arms itself with
-  `request_repaint_after` (200ms recording, 500ms idle). Measured cost of that
-  loop is ~0.4% CPU.
+`jotter record` stops when `--duration` runs out or, without it, when you press
+Enter, and either way it stops the streams and finalizes both writers before
+exiting. Stop it that way rather than killing the process: an abandoned stream
+leaves a WAV whose RIFF header still holds a placeholder length, and many tools
+refuse to open it, so a whole meeting would be unreadable.
 
 Use `/usr/bin/python3` explicitly in anything you add — the `python3` on PATH is
 a homebrew alias pointing at a binary that no longer exists.
@@ -107,9 +91,12 @@ observed symptoms were a system track of 7.9s of perfectly zero samples, and a
 microphone stream that blocked ~7 minutes on a prompt that could not be
 displayed before failing with `Illegal operation`.
 
-`scripts/bundle.sh` fixes this by assembling `build/Jotter.app` with a stable
-`CFBundleIdentifier` (`com.nfishel.jotter`) and the three usage-description
-keys. Launch it through LaunchServices so TCC attributes the request to the
+`scripts/bundle.sh` fixes this by assembling `build/Jotter.app` around the
+`jotter` binary, with a stable `CFBundleIdentifier` (`com.nfishel.jotter`) and
+the three usage-description keys. `LSUIElement` is `true`: the process has no
+window, so it gets no Dock icon either. The bundle icon (`assets/icon.png`) is
+still there, because it is what Finder and the System Settings → Privacy lists
+show. Launch it through LaunchServices so TCC attributes the request to the
 bundle rather than to your terminal:
 
 ```sh
@@ -117,9 +104,16 @@ open -a build/Jotter.app --stdout /tmp/jotter.out --stderr /tmp/jotter.err \
      --args record --only both --duration 10 --out /tmp/rec
 ```
 
+or let the script do it:
+
+```sh
+scripts/check_audio.sh --bundled
+```
+
 Running `build/Jotter.app/Contents/MacOS/jotter` directly does *not* work —
 that re-attributes the request to the terminal. `open` detaches stdout, which
-is why `--stdout`/`--stderr` are needed to see output.
+is why `--stdout`/`--stderr` are needed to see output — and why a bundled
+`record` needs `--duration`: there is no terminal attached to press Enter in.
 
 The bundle lives in `build/`, not `target/`, so `cargo clean` cannot destroy it.
 TCC keys partly on path; losing it means re-granting.
@@ -142,17 +136,18 @@ and microphone, which is what makes the swapped-track check below meaningful.
 ## Linux (PipeWire)
 
 **Status: compiles clean, runtime untested.** Verified only by
-`scripts/check_linux_build.sh`, which runs `cargo check --all-targets` in a
-`rust:1-bookworm` container with the real system headers. Nobody has yet
-confirmed that monitor capture actually produces audio on a live PipeWire
-session — that needs a Linux machine.
+`scripts/check_linux_build.sh`, which runs cargo in a `rust:1-trixie`
+container with the real system headers. Nobody has yet confirmed that monitor
+capture actually produces audio on a live PipeWire session — that needs a
+Linux machine.
 
 ```sh
 scripts/check_linux_build.sh         # cargo check in a container
 scripts/check_linux_build.sh build   # full build (slower)
+scripts/check_linux_build.sh ci      # the whole CI gate
 ```
 
-The Linux target adds cpal's `pipewire` feature (see `Cargo.toml`). cpal's
+The Linux target adds cpal's `pipewire` feature (see `crates/jotter/Cargo.toml`). cpal's
 `default_host()` then prefers PipeWire over PulseAudio and ALSA whenever the
 daemon is running, so no host selection is needed in our code.
 
@@ -174,30 +169,25 @@ CoreAudio output device does.
 Build dependencies (Debian/Ubuntu names):
 
 ```
-pkg-config clang libclang-dev
-libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
-libgtk-3-dev libayatana-appindicator3-dev
-libx11-dev libxcursor-dev libxrandr-dev libxi-dev
-libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+pkg-config clang libclang-dev cmake meson ninja-build
+libpipewire-0.3-dev libspa-0.2-dev libasound2-dev liblzma-dev
 ```
 
 This list is what CI installs; keep the two in step, since a package that is
 only in one of them shows up as a build that works in exactly one place.
-
-The X11 packages are required even on a Wayland desktop (Ubuntu's default since
-21.04). Which display server the *session* runs is a runtime choice; winit
-compiles its x11 and wayland backends both and selects at startup, and gtk3
-links X11 unconditionally. There is deliberately **no `libxdo-dev`**: `tray-icon`
-enables `libxdo` by default, but muda only uses it to synthesise X11 key events
-for predefined menu items (Copy/Paste/…), which this tray does not use and which
-could not work under Wayland anyway. `Cargo.toml` turns that feature off, so the
-bare `-lxdo` link it adds is gone.
+`meson` and `ninja-build` are for the `aec` feature's bundled WebRTC build;
+`cmake` builds the C crypto library behind the HTTPS client; `liblzma-dev` is
+for sherpa-onnx's build script, which unpacks its prebuilt archive with `zip` →
+`xz2` → `lzma-sys` — that crate falls back to a bundled liblzma when pkg-config
+finds none, but a cached target directory keeps whichever it chose first, so CI
+installs it rather than depend on the fallback. At runtime the binary needs only
+`libpipewire-0.3` and `libasound2` — there is no display server dependency, X11
+or Wayland, because there is no window.
 
 Differences from macOS:
 
-- **No bundle, no permissions dance.** Run `scripts/run_app.sh`, which builds
-  and launches `target/debug/jotter` directly. `scripts/bundle.sh` refuses to
-  run on Linux.
+- **No bundle, no permissions dance.** Run `target/debug/jotter record`
+  directly. `scripts/bundle.sh` refuses to run on Linux.
 - **The tone is audible during tests.** Muting is a macOS-only trick: CoreAudio
   taps are verified to capture before device volume, but no equivalent
   guarantee is assumed for a sink monitor, where muting might record silence
@@ -271,7 +261,7 @@ them and hands transcription a doubled copy of the remote side. Headphones make
 the problem vanish; laptop speakers make it the dominant content of `mic.wav`.
 
 ```
-jotter process recordings/<dir>   # clean an existing recording
+jotter process <dir>              # clean an existing recording
 jotter process --dry-run <dir>    # measure and report, write nothing
 jotter record --duration 600      # on by default; cleans it when recording stops
 ```
@@ -280,8 +270,9 @@ Both `process` and `record` print what the pass achieved, and the same figures
 land in `meta.json` under `aec` — so judging a recording needs nothing beyond
 the binary.
 
-**On by default.** Turn it off in the settings pane, with `--no-aec`, or by
-setting `aec_enabled` to `false` in the config file.
+**On by default.** Turn it off for one recording with `--no-aec`, or for every
+recording by setting `aec_enabled` to `false` in `settings.json` (`jotter
+telemetry` prints where that file is).
 
 Defaulting on is only defensible because the pass cannot damage a recording:
 `mic.wav` is never modified, a recording it cannot handle is declined with the
@@ -307,11 +298,11 @@ a fresh install: it needs a ~630 MB speech model.
 
 ```bash
 jotter models pull                 # once, checksum-verified
-jotter transcribe recordings/<dir> # or tick the box in the settings pane
+jotter transcribe <dir>            # an existing recording
 ```
 
-Turn it on in the settings pane, with `--transcribe`, or by setting
-`transcribe_enabled` to `true` in the config file. Enabled without a model, the
+Turn it on for one recording with `--transcribe`, or for every recording by
+setting `transcribe_enabled` to `true` in `settings.json`. Enabled without a model, the
 pass declines with `model_missing` and says which command to run — it does not
 download anything on its own.
 
@@ -386,27 +377,33 @@ like that, including AEC3's own, so above 20 ppm the pass declines.
 ## Code layout
 
 ```
-src/lib.rs              pub mod audio, plus the feature-gated cli and ui
-src/main.rs             clap parsing; no subcommand -> GUI, otherwise -> cli
-src/cli.rs              record / devices subcommands       (feature "cli")
-src/ui.rs               App state machine, tray pumping    (feature "gui")
-src/audio/mod.rs        Recorder: start(RecordConfig) -> RecordingHandle, .stop()
-src/audio/devices.rs    enumeration, direction classification, default selection
-src/audio/capture.rs    open_mic / open_loopback, duplex guard, error mapping
-src/audio/writer.rs     mpsc -> hound writer thread, f32->i16, mono downmix
-src/audio/meta.rs       meta.json sidecar, timestamp_dir_name()
-src/audio/aec/mod.rs    WebRTC AEC3 wrapper, activity thresholds  (feature "aec")
-src/audio/aec/delay.rs  echo-delay measurement, drift and swap guards
-src/audio/process.rs    the offline pass: WAV I/O, two passes, meta rewrite
-src/audio/transcript.rs the transcript.json format  (not feature-gated)
-src/audio/transcribe.rs the transcription pass: VAD, decode, merge  (feature "transcribe")
-src/models.rs           speech-model catalogue and downloader  (feature "transcribe")
+Cargo.toml                                virtual workspace: members, shared version
+crates/jotter/                            the library (package `jotter`, no clap)
+  src/lib.rs                              crate docs: record -> finish -> read transcript
+  src/config.rs                           Settings (settings.json), recordings_root()
+  src/audio/mod.rs                        start(RecordConfig) -> RecordingHandle, .stop()
+  src/audio/pipeline.rs                   finish(): echo -> transcribe -> diarize
+  src/audio/devices.rs                    enumeration, direction classification, default selection
+  src/audio/capture.rs                    open_mic / open_loopback, duplex guard, error mapping
+  src/audio/writer.rs                     mpsc -> hound writer thread, f32->i16, mono downmix
+  src/audio/meta.rs                       meta.json sidecar, timestamp_dir_name()
+  src/audio/aec/mod.rs                    WebRTC AEC3 wrapper, activity thresholds  (feature "aec")
+  src/audio/aec/delay.rs                  echo-delay measurement, drift and swap guards
+  src/audio/process.rs                    the offline pass: WAV I/O, two passes, meta rewrite  (feature "aec")
+  src/audio/transcript.rs                 the transcript.json format  (not feature-gated)
+  src/audio/transcribe.rs                 the transcription pass: VAD, decode, merge  (feature "transcribe")
+  src/audio/diarize.rs                    speaker labels on the system track  (feature "diarize")
+  src/models.rs                           speech-model catalogue and downloader  (feature "transcribe")
+crates/jotter-cli/                        the command line (package `jotter-cli`)
+  src/main.rs                             binary `jotter`: clap parsing, dispatch
+  src/cli.rs                              every subcommand and its console output
+  src/bin/bench.rs                        `jotter-bench`, the benchmark driver  (feature "bench")
 ```
 
 Output per recording:
 
 ```
-recordings/<timestamp>/
+~/Documents/Jotter/<timestamp>/
 ├── mic.wav         (you)
 ├── mic_aec.wav     (you, with speaker echo removed — only if the pass ran)
 ├── system.wav      (everyone else)
@@ -475,17 +472,17 @@ build/Jotter.app        the signed bundle (gitignored; survives cargo clean)
 ```
 
 `bundle.sh` copies the single `jotter` binary into the bundle and pins one
-bundle id, so one permission grant covers the CLI and the tray app. It takes no
-arguments — which of the two you get is decided by the arguments you pass to
+bundle id, so one permission grant covers every subcommand. It takes no
+arguments — which subcommand runs is decided by the arguments you pass to
 `open --args`, not at bundle time.
 
 ## Next steps
 
 1. Real meeting test: a 30+ min call, confirming the files finalize cleanly and
    `stream_errors` stays 0 in `meta.json`.
-2. Tray wiring — Start/Stop recording in the existing menu, device pickers in
-   the settings pane. `RecordingHandle` owns `!Send` cpal streams, so it has to
-   live on the thread that created it.
+2. A longer-running recorder than a blocking `jotter record`, so a meeting can
+   be captured without holding a terminal open. `RecordingHandle` owns `!Send`
+   cpal streams, so it has to live on the thread that created it.
 3. Hand the WAVs to whisper → `action_items.sh`, and confirm two-track input
    actually improves speaker attribution over a mixed file.
 4. Consider a self-signed certificate so TCC grants survive rebuilds.

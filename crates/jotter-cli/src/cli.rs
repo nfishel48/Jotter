@@ -1,23 +1,26 @@
-//! The command-line front end.
+//! The subcommands.
 //!
 //!   jotter devices
 //!   jotter record --duration 10
 //!   jotter record --system <id> --mic <id> --duration 600
-//!   jotter process recordings/<dir>
+//!   jotter process ~/Documents/Jotter/<dir>
 //!
-//! This exists to exercise the capture path without the tray app in the way:
-//! the two macOS permissions are granted separately, and a terminal session
-//! that prints device ids and frame counts is far easier to debug against than
-//! a settings pane.
+//! Printing and argument handling only. Every decision about audio — what to
+//! capture, which passes to run and in what order — is the library's, so the
+//! command and a program embedding the library cannot drift apart. The two
+//! macOS permissions are granted separately, and a terminal session that prints
+//! device ids and frame counts is what makes each of them debuggable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use crate::audio::{self, RecordConfig, Sources, devices::DeviceChoice};
-use crate::config::Settings;
-use crate::telemetry::{Surface, Telemetry, events};
+use jotter::audio::{
+    self, FinishOptions, FinishReport, FinishStage, RecordConfig, Sources, devices::DeviceChoice,
+};
+use jotter::config::{self, Settings};
+use jotter::telemetry::{Prop, Surface, Telemetry, events};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -63,8 +66,8 @@ pub struct DiarizeArgs {
     #[arg(long)]
     force: bool,
 
-    /// How many people were on the call. Required, unless set in the settings
-    /// pane — the pass declines without it
+    /// How many people were on the call. Required, unless `diarize_speakers`
+    /// is set in settings.json — the pass declines without it
     #[arg(long, value_name = "N")]
     speakers: Option<u8>,
 }
@@ -207,7 +210,7 @@ pub struct RecordArgs {
     #[arg(long, value_name = "SECS")]
     duration: Option<u64>,
 
-    /// Output directory (default: ./recordings/<timestamp>)
+    /// Output directory (default: ~/Documents/Jotter/<timestamp>)
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
 
@@ -286,11 +289,15 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut settings = Settings::load();
     let telemetry = Telemetry::init(Surface::Cli, &mut settings);
-    telemetry.track(events::APP_STARTED, &[("is_first_run", false.into())]);
+    let first_run = !settings.telemetry_notice_seen;
+    if first_run && telemetry.is_active() {
+        telemetry_notice(&mut settings);
+    }
+    telemetry.track(events::APP_STARTED, &[("is_first_run", first_run.into())]);
 
     let result = match command {
         Command::Devices => list_devices(&telemetry),
-        Command::Record(args) => record(args, &telemetry),
+        Command::Record(args) => record(args, &settings, &telemetry),
         #[cfg(feature = "aec")]
         Command::Process(args) => process(args, &telemetry),
         #[cfg(feature = "transcribe")]
@@ -310,10 +317,30 @@ pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+/// Say, once, that this build reports anonymous usage and how to stop it.
+///
+/// Telemetry is on by default, and this is the only place a user of the
+/// command is told so. Shown only when something will actually be sent — a
+/// build without an API key, or a user who has already opted out, has nothing
+/// to give notice of — and on stderr, so it never lands in output someone is
+/// piping into another program.
+fn telemetry_notice(settings: &mut Settings) {
+    eprintln!(
+        "Jotter sends anonymous usage and crash reports, which is how recording failures\n\
+         get found and fixed. Never audio, transcripts, file names or device names.\n\
+         Turn it off with `jotter telemetry --disable` or DO_NOT_TRACK=1; see\n\
+         docs/TELEMETRY.md for exactly what is sent. This notice is shown once.\n"
+    );
+    settings.telemetry_notice_seen = true;
+    // Best effort, like the install id: an unwritable config directory means
+    // the notice appears again next run, which is the safe way to fail.
+    let _ = settings.save();
+}
+
 /// `jotter telemetry [--enable|--disable]`, and with neither, a status report.
 ///
-/// The headless half of the settings-pane checkbox. Someone running the CLI on a
-/// server or over SSH should not have to launch a tray app to opt out.
+/// The persistent way to opt out; the environment variables are the per-run
+/// one. Works the same on a server or over SSH as anywhere else.
 fn telemetry_command(args: TelemetryArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = Settings::load();
 
@@ -329,65 +356,45 @@ fn telemetry_command(args: TelemetryArgs) -> Result<(), Box<dyn std::error::Erro
         "disabled"
     };
     println!("telemetry: {stored}");
-    println!("  config:  {}", crate::config::path().display());
+    println!("  config:  {}", config::path().display());
 
     if !cfg!(feature = "telemetry") {
         println!("  note:    this build has telemetry compiled out and sends nothing");
     }
 
-    match crate::config::env_override() {
-        crate::config::EnvOverride::ForceOff => {
+    match config::env_override() {
+        config::EnvOverride::ForceOff => {
             println!("  note:    overridden to OFF by DO_NOT_TRACK / JOTTER_TELEMETRY");
         }
-        crate::config::EnvOverride::ForceOn => {
+        config::EnvOverride::ForceOn => {
             println!("  note:    overridden to ON by JOTTER_TELEMETRY");
         }
-        crate::config::EnvOverride::Unset => {}
+        config::EnvOverride::Unset => {}
     }
 
     println!("\nSee docs/TELEMETRY.md for exactly what is collected.");
     Ok(())
 }
 
-fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
-    // Relative, and deliberately not the GUI's ~/Documents/Jotter: a debugging
-    // run should land next to the checkout, not in with real recordings.
-    let out_dir = args
-        .out
-        .unwrap_or_else(|| PathBuf::from("recordings").join(audio::meta::timestamp_dir_name()));
-
-    // Read before the args are consumed by `RecordConfig`; all three are shapes
-    // of the request, not identifiers of a device.
+fn record(
+    args: RecordArgs,
+    settings: &Settings,
+    telemetry: &Telemetry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Read before `args` is taken apart below. None of these identify a
+    // device: they are shapes of the request.
+    let options = finish_options(&args, settings);
     let sources = args.only.telemetry_name();
     let mic_is_default = args.mic.is_none();
     let system_is_default = args.system.is_none();
-    // Read before `args` is consumed. `--aec`/`--no-aec` override the stored
-    // setting, so a one-off run can opt in or out without editing the config
-    // file — which is the only way to test both paths from a single build.
-    #[cfg(feature = "aec")]
-    let run_aec = if args.aec {
-        true
-    } else if args.no_aec {
-        false
-    } else {
-        Settings::load().aec_enabled
-    };
-    #[cfg(feature = "transcribe")]
-    let run_transcribe = if args.transcribe {
-        true
-    } else if args.no_transcribe {
-        false
-    } else {
-        Settings::load().transcribe_enabled
-    };
-    #[cfg(feature = "diarize")]
-    let run_diarize = if args.diarize {
-        true
-    } else if args.no_diarize {
-        false
-    } else {
-        Settings::load().diarize_enabled
-    };
+
+    // The same place every other recording goes, so `jotter record` output is
+    // found where the user looks for meetings. It also has to be absolute: run
+    // through the macOS bundle — the only way to capture system audio there —
+    // the working directory is `/`.
+    let out_dir = args
+        .out
+        .unwrap_or_else(|| config::recordings_root().join(audio::meta::timestamp_dir_name()));
 
     let config = RecordConfig {
         sources: args.only.into(),
@@ -450,80 +457,172 @@ fn record(args: RecordArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::er
     }
 
     // After the track report, not instead of it: the recording is the result,
-    // and echo removal is something that then happened to it.
-    #[cfg(feature = "aec")]
-    if run_aec {
-        let both_have_audio = [meta.mic.as_ref(), meta.system.as_ref()]
-            .iter()
-            .all(|t| t.is_some_and(|t| t.frames > 0));
-        if both_have_audio {
-            println!();
-            let report = audio::process::run(&dir, audio::process::ProcessOptions::default())?;
-            report_aec(&report, false);
-            telemetry.track(
-                events::RECORDING_PROCESSED,
-                &events::aec_props(&report, false),
-            );
-        }
-    }
-
-    // After echo cancellation, never before it: the transcriber reads whichever
-    // mic track `preferred_mic_path` hands back, and running first would mean
-    // transcribing audio the canceller was about to improve.
-    //
-    // A failure here is reported and swallowed rather than returned. The
-    // recording is on disk and is the result; `jotter transcribe <dir>` can
-    // redo this at any time, and exiting non-zero would imply the capture
-    // failed when it did not.
-    #[cfg(feature = "transcribe")]
-    if run_transcribe {
-        println!();
-        match audio::transcribe::run(&dir, Default::default()) {
-            Ok(report) => report_transcript(&report, false),
-            Err(e) => println!("  transcription failed: {e}"),
-        }
-    }
-
-    // After transcription, never before it: this pass labels the segments that
-    // pass wrote, and with no transcript on disk it can only decline. Swallowed
-    // on failure for the same reason as transcription — the recording is the
-    // result, and `jotter diarize <dir>` can redo this at any time.
-    #[cfg(feature = "diarize")]
-    if run_diarize {
-        println!();
-        let options = audio::diarize::DiarizeOptions {
-            speakers: speaker_count(Settings::load().diarize_speakers),
-            ..Default::default()
-        };
-        match audio::diarize::run(&dir, options) {
-            Ok(report) => {
-                report_diarization(&report, false);
-                telemetry.track(events::RECORDING_DIARIZED, &events::diarize_props(&report));
-            }
-            Err(e) => println!("  speaker identification failed: {e}"),
-        }
-    }
+    // and what the offline passes then did to it comes second. Nothing they do
+    // can fail this command — the audio is on disk, and `jotter process`,
+    // `transcribe` and `diarize` can redo any of them — so a failed pass is
+    // printed and the exit status stays zero.
+    let report = finish_recording(&dir, &options);
+    track_finish(telemetry, &report);
+    print_finish(&report);
 
     Ok(())
 }
 
-/// The stored speaker count as the stage wants it.
-///
-/// `0` is the settings file's way of saying "not set" — a `u8` with a sentinel
-/// rather than an `Option`, because `Settings` is a flat serde struct and a
-/// missing key already means default. The stage takes an `Option`, where the
-/// absence is unambiguous, so the translation happens once, here.
-#[cfg(feature = "diarize")]
-fn speaker_count(stored: u8) -> Option<u8> {
-    (stored > 0).then_some(stored)
+/// Which passes `record` runs: the stored settings, with this run's flags on
+/// top. `--aec`/`--no-aec` and friends exist so a one-off run can opt in or out
+/// without editing the config file — which is also the only way to test both
+/// paths from a single build.
+// Nothing to override in a build without any pass.
+#[cfg_attr(
+    not(any(feature = "aec", feature = "transcribe")),
+    allow(unused_variables)
+)]
+fn finish_options(args: &RecordArgs, settings: &Settings) -> FinishOptions {
+    let stored = FinishOptions::from_settings(settings);
+    FinishOptions {
+        #[cfg(feature = "aec")]
+        aec: flag_or(args.aec, args.no_aec, stored.aec),
+        #[cfg(feature = "transcribe")]
+        transcribe: flag_or(args.transcribe, args.no_transcribe, stored.transcribe),
+        #[cfg(feature = "diarize")]
+        diarize: flag_or(args.diarize, args.no_diarize, stored.diarize),
+        ..stored
+    }
 }
 
-/// Mirror of `ui::App::report_recording_failure`.
+/// An `--x`/`--no-x` pair over a stored default. clap's `overrides_with` means
+/// at most one of the two is set, whichever came last on the command line.
+#[cfg(any(feature = "aec", feature = "transcribe"))]
+fn flag_or(on: bool, off: bool, stored: bool) -> bool {
+    if on {
+        true
+    } else if off {
+        false
+    } else {
+        stored
+    }
+}
+
+/// Run `audio::finish` over a just-stopped recording, with a progress line.
 ///
-/// Same rule: `kind` and `cpal_kind`, never `to_string()`. The `Display` impl
-/// names the device, which is the one thing that must not be sent.
+/// The line is rewritten in place and wiped at the end, and only on a
+/// terminal, for the reason `models pull` gives: piped, carriage returns are
+/// not rewrites but ordinary bytes.
+fn finish_recording(dir: &Path, options: &FinishOptions) -> FinishReport {
+    use std::io::{IsTerminal, Write};
+
+    let interactive = std::io::stdout().is_terminal();
+    let mut last: Option<(FinishStage, u8)> = None;
+    let report = audio::finish_with_progress(dir, options, &mut |stage, fraction| {
+        if !interactive {
+            return;
+        }
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
+        if last == Some((stage, percent)) {
+            return;
+        }
+        last = Some((stage, percent));
+        let label = match stage {
+            FinishStage::Aec => "removing speaker echo",
+            FinishStage::Transcribe => "transcribing",
+            FinishStage::Diarize => "identifying speakers",
+        };
+        print!("\r  {:<40}", format!("{label}… {percent}%"));
+        let _ = std::io::stdout().flush();
+    });
+    if last.is_some() {
+        print!("\r{:44}\r", "");
+    }
+    report
+}
+
+/// Report what the passes did. Separate from printing so that every way of
+/// finishing a recording reports it the same way, whatever it shows the user.
+///
+/// Declines are reported like successes — the stage ran and decided — and
+/// skips and failures are not, the same as the standalone commands, which
+/// report nothing when a pass errors out.
+#[cfg_attr(
+    not(any(feature = "aec", feature = "transcribe")),
+    allow(unused_variables)
+)]
+pub(crate) fn track_finish(telemetry: &Telemetry, report: &FinishReport) {
+    #[cfg(feature = "aec")]
+    if let Some(aec) = report.aec.report() {
+        telemetry.track(events::RECORDING_PROCESSED, &events::aec_props(aec, false));
+    }
+    #[cfg(feature = "transcribe")]
+    if let Some(transcript) = report.transcribe.report() {
+        telemetry.track(
+            events::RECORDING_TRANSCRIBED,
+            &events::transcript_props(transcript),
+        );
+    }
+    #[cfg(feature = "diarize")]
+    if let Some(diarization) = report.diarize.report() {
+        telemetry.track(
+            events::RECORDING_DIARIZED,
+            &events::diarize_props(diarization),
+        );
+    }
+}
+
+/// Print each pass that was attempted, in the shape the standalone commands
+/// use. A pass that was switched off prints nothing, as it did not happen; one
+/// that was enabled and found nothing to work on says so, since the user asked
+/// for it. The echo pass is the exception: it is on by default, so a
+/// single-track recording would otherwise announce, every time, that it did
+/// not cancel echo it could never have had.
+#[cfg_attr(
+    not(any(feature = "aec", feature = "transcribe")),
+    allow(unused_variables)
+)]
+fn print_finish(report: &FinishReport) {
+    #[cfg(feature = "transcribe")]
+    use audio::Skip;
+    #[cfg(any(feature = "aec", feature = "transcribe"))]
+    use audio::StageOutcome;
+
+    #[cfg(feature = "aec")]
+    match &report.aec {
+        StageOutcome::Ran(aec) => {
+            println!();
+            report_aec(aec, false);
+        }
+        StageOutcome::Failed(e) => println!("\n  echo cancellation failed: {e}"),
+        StageOutcome::Skipped(_) => {}
+    }
+
+    #[cfg(feature = "transcribe")]
+    match &report.transcribe {
+        StageOutcome::Ran(transcript) => {
+            println!();
+            report_transcript(transcript, false);
+        }
+        StageOutcome::Failed(e) => println!("\n  transcription failed: {e}"),
+        StageOutcome::Skipped(Skip::Disabled) => {}
+        StageOutcome::Skipped(skip) => println!("\n  transcription skipped: {skip}"),
+    }
+
+    #[cfg(feature = "diarize")]
+    match &report.diarize {
+        StageOutcome::Ran(diarization) => {
+            println!();
+            report_diarization(diarization, false);
+        }
+        StageOutcome::Failed(e) => println!("\n  speaker identification failed: {e}"),
+        StageOutcome::Skipped(Skip::Disabled) => {}
+        StageOutcome::Skipped(skip) => println!("\n  speaker identification skipped: {skip}"),
+    }
+}
+
+/// Report a capture failure as both an event and an exception.
+///
+/// Note what is *not* passed: `e.to_string()`. The `Display` impl embeds the
+/// device name and is written for the terminal; `kind` and `cpal_kind` are the
+/// `&'static str` classifications meant to leave the machine.
 fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture::CaptureError) {
-    let props: Vec<crate::telemetry::Prop> = vec![
+    let props: Vec<Prop> = vec![
         ("phase", phase.into()),
         ("error_kind", e.kind().into()),
         ("cpal_kind", e.cpal_kind().into()),
@@ -637,7 +736,7 @@ fn transcribe(
     // default inside the stage: someone who asked for a particular model and
     // got another one has been lied to about what produced the transcript.
     if let Some(id) = args.model.as_deref()
-        && crate::models::find(id).is_none()
+        && jotter::models::find(id).is_none()
     {
         return Err(format!("unknown model {id:?} — see `jotter models list`").into());
     }
@@ -731,9 +830,7 @@ fn diarize(args: DiarizeArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
         // always meets the same people. Neither is a decline the stage reports,
         // rather than an error here, because `--dry-run` should still be able to
         // say what else is or is not ready.
-        speakers: args
-            .speakers
-            .or_else(|| speaker_count(Settings::load().diarize_speakers)),
+        speakers: args.speakers.or_else(|| Settings::load().speaker_count()),
     };
 
     println!("identifying speakers in {}", args.dir.display());
@@ -823,7 +920,7 @@ fn report_diarization(report: &audio::diarize::DiarizeReport, dry_run: bool) {
 /// what they transcribe, and there is no aggregate worth that.
 #[cfg(feature = "transcribe")]
 fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::models;
+    use jotter::models;
 
     match args.command {
         ModelsCommand::Path => {
@@ -858,7 +955,7 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
             // than left opt-in because it is 35 MB against the recogniser's 630.
             // Making someone come back for a second deliberate download would
             // cost them more attention than the bytes cost their disk, and would
-            // leave the settings toggle dead for everyone who pulled already.
+            // leave `diarize_enabled` dead for everyone who pulled already.
             let wanted: Vec<&'static models::Model> =
                 match args.model.as_deref() {
                     Some(id) => vec![models::find(id).ok_or_else(|| {
@@ -894,7 +991,8 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "\ntranscribe an existing recording with `jotter transcribe <dir>`,\n\
                      or a single run with `jotter record --transcribe`. To do it for\n\
-                     every recording, tick Transcribe in the settings pane."
+                     every recording, set \"transcribe_enabled\": true in\n  {}",
+                    config::path().display()
                 );
             }
         }
@@ -911,8 +1009,8 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
 /// unreadable line a hundred fragments long. There the per-asset summary line
 /// is the whole output, which is what a log wants anyway.
 #[cfg(feature = "transcribe")]
-fn pull_one(model: &'static crate::models::Model) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::models::fetch::{self, Progress};
+fn pull_one(model: &'static jotter::models::Model) -> Result<(), Box<dyn std::error::Error>> {
+    use jotter::models::fetch::{self, Progress};
     use std::io::{IsTerminal, Write};
 
     let interactive = std::io::stdout().is_terminal();

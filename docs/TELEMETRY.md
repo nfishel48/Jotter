@@ -13,11 +13,10 @@ Any one of these is sufficient, and each takes effect immediately:
 
 | How | Where |
 | --- | --- |
-| Untick **Send anonymous usage and crash reports** | Settings pane, bottom |
-| `jotter telemetry --disable` | Terminal; `jotter telemetry` shows current state |
+| `jotter telemetry --disable` | Terminal; `jotter telemetry` shows current state, `--enable` turns it back on |
 | `DO_NOT_TRACK=1` | Environment ([consoledonottrack.com](https://consoledonottrack.com)) |
 | `JOTTER_TELEMETRY=0` | Environment; overrides the stored setting either way |
-| `cargo build --no-default-features --features gui,cli` | Build with no telemetry code at all |
+| `cargo build -p jotter-cli --no-default-features --features aec,transcribe,diarize` | Build with no telemetry code at all — no HTTP client, no async runtime |
 
 The preference lives in `settings.json`, alongside the rest of Jotter's config:
 
@@ -26,13 +25,33 @@ The preference lives in `settings.json`, alongside the rest of Jotter's config:
 
 `jotter telemetry` prints the exact path.
 
-While telemetry is off, no PostHog client is created, no feature flags are
-fetched, and the process makes no network connections of any kind. Jotter has no
-other reason to use the network, so an opted-out Jotter is entirely offline.
+While telemetry is off, no telemetry thread is started, no PostHog client is
+created, no install id is minted, and the process makes no network connections
+of any kind. Jotter has no other reason to use the network — except
+`jotter models pull`, which you run deliberately — so an opted-out Jotter is
+entirely offline.
 
 Builds without an API key — which is every build that did not come from this
 repository's release workflow, including any `cargo build` you run yourself —
-also send nothing. The settings pane says so instead of showing a live checkbox.
+also send nothing, and show no first-run notice, since there is nothing to give
+notice of.
+
+### The first-run notice
+
+The first time Jotter runs with telemetry active — a build with an API key, and
+nothing above turning it off — it prints a one-time notice to stderr saying what
+is sent and how to stop it, then records `telemetry_notice_seen` in
+`settings.json` so it is not repeated. Running `jotter telemetry --enable` or
+`--disable` also marks it seen: having made the choice, you have read enough.
+
+### Using Jotter as a library
+
+The `jotter` library crate has a `telemetry` feature too, and it is **off by
+default** there; only the `jotter` command turns it on. An app that depends on
+the library gets no telemetry code unless it asks for it, and should not ask:
+the events would be reported into Jotter's PostHog project, labelled as Jotter,
+and the app's users would never have been told. Nothing on this page applies to
+a host app built with the library's default features.
 
 ## What is collected
 
@@ -43,9 +62,8 @@ also send nothing. The settings pane says so instead of showing a live checkbox.
 | `$app_name`, `$app_version` | `Jotter`, `0.1.3` |
 | `$os`, `$os_version` | `Mac OS X`, `26.3.1` |
 | `arch`, `$device_type` | `aarch64`, `Desktop` |
-| `surface` | `gui` or `cli` |
-| `build_features` | `gui+cli` |
-| `$feature/*` | Which feature flags were active |
+| `surface` | `cli` |
+| `build_features` | Which optional pipeline stages the build contains, joined with `+`: `aec+transcribe+diarize`, or `none` |
 | `$lib`, `$lib_version` | `posthog-rs`, `0.25.5` |
 
 The PostHog SDK copies the `$`-prefixed ones above into a person profile, as
@@ -72,20 +90,20 @@ takes the other option.
 
 | Event | When | Properties |
 | --- | --- | --- |
-| `app_started` | Launch | `is_first_run`, `device_count`, `has_loopback_device`, `launch_failed` |
-| `app_exited` | Quit | `reason`, `session_secs`, `recordings_this_session` |
-| `recording_started` | Recording begins | `mic_is_default`, `system_is_default`, `has_loopback_device`, `sources`, `fixed_duration`, `force_system_on_duplex` |
+| `app_started` | Launch | `is_first_run` |
+| `app_exited` | The command finished | `reason` (`cli_done`) |
+| `recording_started` | Recording begins | `sources`, `mic_is_default`, `system_is_default`, `force_system_on_duplex`, `fixed_duration` |
 | `recording_completed` | Recording saved | `duration_bucket`, `track_count`, `stream_errors`, `{mic,system}_present`, `{mic,system}_captured_audio`, `{mic,system}_sample_rate`, `{mic,system}_source_channels`, `track_offset_ms` |
 | `recording_failed` | Recording could not start or finish | `phase`, `error_kind`, `cpal_kind`, `permission_shaped` |
 | `recording_processed` | Echo cancellation ran, or declined to | `dry_run`, `applied`, `delay_source`, `delay_ms`, `delay_segments`, `drift_ppm`, `aec3_delay_ms`, `far_gap_secs`, `duration_bucket`, `erle_db`, `near_gain_db`, `double_talk_gain_db`, `bypass_reason`, `double_talk_pct`, `far_only_pct` |
-| `recording_transcribed` | Transcription ran, or declined to | `model`, `engine`, `produced_transcript`, `duration_bucket`, `decline_reason`, `segments`, `mic_segments`, `system_segments`, `words`, `speech_pct`, `realtime_factor_pct` |
+| `recording_transcribed` | Transcription ran after `jotter record`, or declined to | `model`, `engine`, `produced_transcript`, `duration_bucket`, `decline_reason`, `segments`, `mic_segments`, `system_segments`, `words`, `speech_pct`, `realtime_factor_pct` |
 | `recording_diarized` | Speaker identification ran, or declined to | `segmentation_model`, `embedding_model`, `engine`, `labelled_transcript`, `duration_bucket`, `decline_reason`, `speakers`, `system_segments`, `attributed_pct`, `realtime_factor_pct` |
 | `devices_refreshed` | Device list read | `total`, `input_capable`, `loopback_capable`, `has_default_output` |
 | `device_list_failed` | Device list could not be read | `error_kind` |
-| `settings_opened` | Settings window shown | `trigger` |
-| `tray_menu_clicked` | Tray menu used | `id` |
-| `recordings_folder_opened` | Folder opened in Finder/file manager | `source` |
-| `telemetry_opted_in` / `telemetry_opted_out` | The setting changed | — |
+
+`recording_transcribed` is sent only when `jotter record` transcribes the
+recording it just made. The standalone `jotter transcribe` command sends
+nothing.
 
 Recording length is reported as a bucket (`<10s`, `1-5m`, `>2h`, …) rather than a
 number. An exact duration paired with a timestamp would be a reasonably strong
@@ -133,10 +151,10 @@ before sending. Verified on a real captured panic whose message contained a home
 path: the ingested event had no occurrence of the username or of `/Users/`, and
 the path arrived rewritten.
 
-A panic in the first few milliseconds of launch may not be captured. The hook is
-installed as soon as the telemetry thread has built its client, but window and
-tray construction can win that race. Nothing is lost when it does — the panic
-simply is not reported.
+A panic in the first few milliseconds of a run may not be captured. The hook is
+installed as soon as the telemetry thread has built its client, and a panic
+before that wins the race. Nothing is lost when it does — the panic simply is
+not reported.
 
 ## What is never collected
 
@@ -154,22 +172,22 @@ simply is not reported.
 
 ## Feature flags
 
-Jotter evaluates PostHog feature flags remotely, once at startup, in the tray app
-only. The only flag that currently exists is `telemetry-kill-switch`, which lets
-ingestion be stopped for a release that turns out to be misbehaving without
-waiting for everyone to update.
+Jotter evaluates no PostHog feature flags. The one that existed,
+`telemetry-kill-switch`, was only ever evaluated by a graphical front end that
+has since been removed, so no flag request is made and none is reported with
+events.
 
-Local flag evaluation is deliberately not used: it requires a personal API key,
-and there is nowhere to put one in an open-source binary.
+Local flag evaluation would need a personal API key, and there is nowhere to
+put one in an open-source binary.
 
 ## For contributors
 
-- Event names live in `src/telemetry/events.rs` and nowhere else.
+- Event names live in `crates/jotter/src/telemetry/events.rs` and nowhere else.
 - Event property values are `&'static str` or numbers. That is not a convention,
   it is the type signature of `Telemetry::track` and `Telemetry::report_error` —
   a `&'static str` cannot hold a device name or a path, so the compiler enforces
   most of this document. Use `CaptureError::kind()`, never `err.to_string()`.
-- `src/telemetry/scrub.rs` redacts the home directory from everything on the way
+- `crates/jotter/src/telemetry/scrub.rs` redacts the home directory from everything on the way
   out. It exists for payloads Jotter does not construct itself, namely panic
   messages and stack frames.
 - Adding an event means adding a row to the table above in the same commit.

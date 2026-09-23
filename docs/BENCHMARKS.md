@@ -8,8 +8,8 @@ This describes how that number is produced: what is measured, on what, with what
 scoring, and — as much as anything — what the numbers do *not* say.
 
 The harness lives in [`benchmarks/`](../benchmarks). It is developer tooling.
-Nothing in it is compiled into the shipped binary, and the `bench` cargo feature
-that builds its driver is off by default.
+Nothing in it is compiled into the shipped binary, and the `jotter-cli` crate's
+`bench` cargo feature that builds its driver is off by default.
 
 ---
 
@@ -81,7 +81,7 @@ as Jotter.
 
 ### 3. Echo cancellation
 
-`Cargo.toml` justifies the AEC3 dependency with figures from one reference
+`crates/jotter/Cargo.toml` justifies the AEC3 dependency with figures from one reference
 recording. This generalises that to a swept test set where the ground truth is
 known by construction.
 
@@ -186,7 +186,8 @@ call. LibriSpeech test-clean is 2620 utterances, so driving the benchmark
 through it would spend hours reloading 660 MB of model — measuring process
 startup, not accuracy.
 
-`jotter-bench` (cargo feature `bench`, off by default) loads the model once and
+`jotter-bench` (`crates/jotter-cli/src/bin/bench.rs`, cargo feature `bench`,
+off by default; `cargo build --release -p jotter-cli --features bench`) loads the model once and
 walks a manifest. The thing that makes its numbers meaningful is that it is not
 a second implementation: it calls `audio::transcribe::transcribe_track`, the
 same function the real pass calls, which is why that function is `pub`.

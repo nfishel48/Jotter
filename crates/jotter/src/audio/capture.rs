@@ -151,7 +151,7 @@ impl std::error::Error for CaptureError {}
 impl CaptureError {
     /// A stable, PII-free name for this failure.
     ///
-    /// `Display` is written for a human staring at the settings pane, so it
+    /// `Display` is written for a human reading the terminal, so it
     /// embeds device names and ids — and a device name is routinely a person's
     /// name ("Nick's AirPods"). Anything that leaves the machine, which today
     /// means telemetry, must use this instead of `to_string()`.

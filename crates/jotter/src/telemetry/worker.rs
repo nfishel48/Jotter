@@ -1,24 +1,22 @@
 //! The one thread in the process that touches the network.
 //!
-//! Everything here runs off the UI thread. The front ends only ever push a
+//! Everything here runs off the caller's thread. Call sites only ever push a
 //! [`Cmd`] onto a channel, so a slow or unreachable PostHog cannot stall a
-//! repaint, and a recording never waits on an HTTP request.
+//! command's output, and a recording never waits on an HTTP request.
 //!
 //! The thread owns a small tokio runtime and drives the SDK's futures with
 //! `block_on`. Receiving on a blocking channel is what it does most of the time,
 //! which is exactly the thing you must not do inside an async task — hence the
 //! sync loop with async islands, rather than an async main loop.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, RwLock};
 
 use posthog_rs::{
-    CaptureExceptionOptions, ClientOptionsBuilder, ErrorTrackingOptionsBuilder,
-    EvaluateFlagsOptions, Event, FeatureFlagEvaluations,
+    CaptureExceptionOptions, ClientOptionsBuilder, ErrorTrackingOptionsBuilder, Event,
 };
 
-use super::{Prop, Surface, events, scrub};
+use super::{Prop, Surface, scrub};
 
 /// How long teardown may spend draining, per surface.
 ///
@@ -26,15 +24,13 @@ use super::{Prop, Surface, events, scrub};
 /// responds, which on a healthy network is well under 200ms. It only bites when
 /// PostHog is slow or unreachable.
 ///
-/// The tray app is quitting anyway, so two seconds is invisible. A CLI run is a
-/// different matter — `jotter devices` prints its table instantly, and making
-/// someone watch a finished command sit there while a background thread
-/// negotiates TLS is the kind of thing that gets telemetry ripped out of a
-/// project. Its ceiling is low enough to stay tolerable in the worst case while
-/// still comfortably fitting a real round trip.
+/// A CLI run is the case that sets it: `jotter devices` prints its table
+/// instantly, and making someone watch a finished command sit there while a
+/// background thread negotiates TLS is the kind of thing that gets telemetry
+/// ripped out of a project. The ceiling is low enough to stay tolerable in the
+/// worst case while still comfortably fitting a real round trip.
 pub fn shutdown_budget_ms(surface: Surface) -> u64 {
     match surface {
-        Surface::Gui => 2_000,
         Surface::Cli => 1_500,
     }
 }
@@ -50,7 +46,9 @@ pub enum Cmd {
         detail: Option<&'static str>,
         props: Vec<Prop>,
     },
-    SetEnabled(bool),
+    /// Build the client. Sent once, by `Telemetry::init`, which only creates a
+    /// worker at all when telemetry is allowed.
+    Start,
     /// Drain and stop. The channel acknowledges so the caller can bound its wait.
     Shutdown(SyncSender<()>),
 }
@@ -60,27 +58,13 @@ pub struct State {
     pub api_key: String,
     pub distinct_id: String,
     pub surface: Surface,
-    /// The enqueue gate, flipped by the handle the instant the user acts, so
-    /// `track` stops accepting work immediately rather than whenever the worker
-    /// gets round to the message.
-    ///
-    /// `Relaxed` throughout: this gates a best-effort side channel, and nothing
-    /// is ordered against it.
-    pub enabled: AtomicBool,
-    /// The transmit gate, read by `before_send` on the SDK's own worker.
-    ///
-    /// Separate from `enabled` because of one event: `telemetry_opted_out` is
-    /// enqueued *while opting out*, so a single flag would have it dropped by
-    /// the very change it reports. The worker lowers this only after flushing
-    /// what was already queued — see the `SetEnabled` arm.
-    pub sending: AtomicBool,
-    pub flags: RwLock<Option<FeatureFlagEvaluations>>,
     pub home: String,
 }
 
 pub fn run(rx: Receiver<Cmd>, state: Arc<State>) {
-    // One worker thread: this handles a few dozen events per session, and the
-    // default (one per core) would be an absurd tax on a tray app.
+    // One worker thread: this handles a few dozen events per run, and the
+    // default (one per core) would be an absurd tax on a command that lives for
+    // seconds.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .thread_name("jotter-telemetry-io")
@@ -91,37 +75,19 @@ pub fn run(rx: Receiver<Cmd>, state: Arc<State>) {
         return;
     };
 
-    // Whether the PostHog client exists yet. It is created on the first
-    // transition to enabled and never destroyed: `init_global` installs the
-    // panic hook and stores the client in a `OnceLock`, so there is exactly one
-    // chance to do it. Opting back out is handled by `before_send` dropping
-    // every event instead — see `client_options`.
+    // Whether the PostHog client exists yet. `init_global` installs the panic
+    // hook and stores the client in a `OnceLock`, so there is exactly one
+    // chance to create it; a failure leaves every later event dropped here.
     let mut started = false;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            Cmd::SetEnabled(true) => {
-                state.sending.store(true, Ordering::Relaxed);
+            Cmd::Start => {
                 if !started {
                     started = runtime.block_on(start(&state));
                 }
             }
 
-            Cmd::SetEnabled(false) => {
-                // Flush before closing the gate, not after. Anything already
-                // queued was enqueued while the user was still opted in — most
-                // importantly `telemetry_opted_out` itself, which is enqueued
-                // immediately before this message and would otherwise be
-                // dropped by the change it is reporting.
-                if started {
-                    runtime.block_on(posthog_rs::flush());
-                }
-                state.sending.store(false, Ordering::Relaxed);
-            }
-
-            // No gate check here: the handle already checked `enabled` at
-            // enqueue time, and the channel is FIFO, so re-checking would only
-            // misjudge events queued before a change that has since landed.
             Cmd::Capture { name, props } => {
                 if !started {
                     continue;
@@ -166,13 +132,7 @@ pub fn run(rx: Receiver<Cmd>, state: Arc<State>) {
     }
 }
 
-/// Bring the client up: evaluate flags, honour the kill switch, then initialize.
-///
-/// Flags are evaluated *before* `init_global` so that a kill switch can prevent
-/// the reporting client from ever being constructed, rather than switching it
-/// off after the fact. The flag client is a separate short-lived instance
-/// because the SDK exposes flag evaluation on `Client` only, and the global is
-/// private — it is shut down again a few lines later.
+/// Bring the client up.
 ///
 /// Returns whether capture is now possible.
 async fn start(state: &Arc<State>) -> bool {
@@ -180,68 +140,26 @@ async fn start(state: &Arc<State>) -> bool {
         return false;
     };
 
-    // `init_global` first, and before any network call, because it is what
-    // installs the panic hook. Every panic in this app is in startup — tray
-    // construction — so the hook is in a race with the thing it exists to catch,
-    // and the only lever is to make it win more often. `init_global` itself does
-    // no I/O; it just builds the client. Evaluating flags first, as this used to,
-    // put a full round trip in front of the hook and lost the panic outright.
-    // Measured, not assumed: see docs/TELEMETRY.md.
-    if posthog_rs::init_global(options).await.is_err() {
-        return false;
-    }
-
-    // Flags are a GUI-only concern. The tray app runs for hours, so a round trip
-    // at startup costs nothing and the kill switch protects the surface that
-    // actually produces volume. A CLI invocation lives for a second or two, and
-    // a blocking `/flags` request is most of that.
-    if state.surface == Surface::Gui {
-        let Ok(flag_options) = client_options(state) else {
-            return true;
-        };
-        // A second client purely because flag evaluation is exposed on `Client`
-        // and the global is private. Shut down again a few lines later.
-        let flag_client = posthog_rs::client(flag_options).await;
-        if let Ok(flags) = flag_client
-            .evaluate_flags(state.distinct_id.clone(), EvaluateFlagsOptions::default())
-            .await
-        {
-            if flags.is_enabled(events::FLAG_KILL_SWITCH) {
-                // The client now exists — it had to, for the panic hook — so the
-                // switch works by closing the transmit gate instead of by never
-                // constructing it. Same observable result: `before_send` drops
-                // everything, including anything already queued. The stronger
-                // "no client at all" property still holds for the opt-out, which
-                // never calls this function in the first place.
-                state.enabled.store(false, Ordering::Relaxed);
-                state.sending.store(false, Ordering::Relaxed);
-                flag_client.shutdown().await;
-                return false;
-            }
-            if let Ok(mut slot) = state.flags.write() {
-                *slot = Some(flags);
-            }
-        }
-        // A failed evaluation is not fatal: every flag then reads `false`, which
-        // is the same answer as "not rolled out to you".
-        flag_client.shutdown().await;
-    }
-
-    true
+    // `init_global` before anything else, and before any network call,
+    // because it is what installs the panic hook, and the hook is in a race
+    // with the startup panics it exists to catch. `init_global` itself does no
+    // I/O; it just builds the client. Evaluating feature flags first, as this
+    // once did, put a full round trip in front of the hook and lost the panic
+    // outright. Measured, not assumed: see docs/TELEMETRY.md.
+    posthog_rs::init_global(options).await.is_ok()
 }
 
 fn client_options(state: &Arc<State>) -> Result<posthog_rs::ClientOptions, ()> {
-    let enabled = Arc::clone(state);
     let home = state.home.clone();
 
     let error_tracking = ErrorTrackingOptionsBuilder::default()
         .capture_stacktrace(true)
-        // Installs a process-wide panic hook. The six `.unwrap()`/`.expect()`
-        // calls in tray construction are the app's most likely hard crash, and
-        // today they produce nothing but a line on a stderr nobody reads.
+        // Installs a process-wide panic hook. Without it a panic produces
+        // nothing but a line on a stderr that, for anything launched through
+        // the macOS bundle, nobody is reading.
         .capture_panics(true)
-        // Without this every cpal, eframe and wgpu frame is "in app" and the
-        // grouped issue is named after whichever dependency was on top.
+        // Without this every cpal, sherpa-onnx and tokio frame is "in app" and
+        // the grouped issue is named after whichever dependency was on top.
         .in_app_include_paths(vec!["jotter".to_string()])
         .build()
         .map_err(|_| ())?;
@@ -267,17 +185,8 @@ fn client_options(state: &Arc<State>) -> Result<posthog_rs::ClientOptions, ()> {
         .max_queue_size(500)
         // Quitting a recorder must not depend on the network being up.
         .shutdown_timeout_ms(shutdown_budget_ms(state.surface))
-        .feature_flags_request_timeout_seconds(3)
         .error_tracking(error_tracking)
         .before_send(move |mut event| {
-            // The opt-out gate. Runs on the SDK's worker immediately before the
-            // HTTP send, so a `false` here means the event is dropped without
-            // ever reaching the network — including events already queued when
-            // the user unticked the box, and including the panic `$exception`
-            // events the SDK's own hook produces without passing through us.
-            if !enabled.sending.load(Ordering::Relaxed) {
-                return None;
-            }
             // Stop ingestion recording the address the event arrived from.
             // `disable_geoip` only suppresses the *derived* location properties;
             // without this the raw `$ip` is still stored on every event, and an
@@ -330,14 +239,6 @@ fn build_event(state: &Arc<State>, name: &'static str, props: Vec<Prop>) -> Even
         // Fails only on a non-serializable value, which `serde_json::Value`
         // never is. Dropping one property beats dropping the event.
         let _ = event.insert_prop(key, value);
-    }
-
-    // Adds `$feature/<key>` and `$active_feature_flags`, so any event can be
-    // sliced by flag without a join.
-    if let Ok(flags) = state.flags.read()
-        && let Some(flags) = flags.as_ref()
-    {
-        event.with_flags(flags);
     }
 
     event
