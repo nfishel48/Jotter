@@ -135,7 +135,7 @@ and microphone, which is what makes the swapped-track check below meaningful.
 ## Linux (PipeWire)
 
 **Status: compiles clean, runtime untested.** Verified only by
-`scripts/check_linux_build.sh`, which runs cargo in a `rust:1-bookworm`
+`scripts/check_linux_build.sh`, which runs cargo in a `rust:1-trixie`
 container with the real system headers. Nobody has yet confirmed that monitor
 capture actually produces audio on a live PipeWire session — that needs a
 Linux machine.
