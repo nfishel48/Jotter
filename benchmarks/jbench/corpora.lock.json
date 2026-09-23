@@ -1,0 +1,492 @@
+{
+  "ami-EN2002a.Headset-0.wav": {
+    "md5": "8a26a6ae9c47f5a5ed6d69feda718a1c",
+    "sha256": "57ff80f887035ce46b1820f98c2adb67e2f8b17dd5ddf829db85c05318f0b026",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002a/audio/EN2002a.Headset-0.wav"
+  },
+  "ami-EN2002a.Headset-1.wav": {
+    "md5": "1f19e5614e99cc525f94aea9a78641d6",
+    "sha256": "3a77a667b65a167c69d27fe9c06524aab5579bb0aff191edfad890af16638987",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002a/audio/EN2002a.Headset-1.wav"
+  },
+  "ami-EN2002a.Headset-2.wav": {
+    "md5": "af5e839f6f4467afdb699abff80f8d78",
+    "sha256": "ce77e415d3a72fc171989eee06527ea76d1e9f4b21ffcf2f677e88c3bad7c106",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002a/audio/EN2002a.Headset-2.wav"
+  },
+  "ami-EN2002a.Headset-3.wav": {
+    "md5": "96c8afbdf90de857da9b9d339319fb59",
+    "sha256": "dd4814d768b397f7cd522522e9cbb62579a09d8279a202ace3b3ae6534fec51e",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002a/audio/EN2002a.Headset-3.wav"
+  },
+  "ami-EN2002b.Headset-0.wav": {
+    "md5": "25b1afda12260547bfd31ba2ce51919f",
+    "sha256": "c1d29d1fe2abc238ee98464fb71b0f33c9f92d8be14fce2e9857341b8f22420c",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002b/audio/EN2002b.Headset-0.wav"
+  },
+  "ami-EN2002b.Headset-1.wav": {
+    "md5": "0ccd644f625d16886016e68542065e67",
+    "sha256": "ebf3eea1d9459b31f191593893ff30e57aed6c23da5c843162e8a0e77d1fae87",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002b/audio/EN2002b.Headset-1.wav"
+  },
+  "ami-EN2002b.Headset-2.wav": {
+    "md5": "05e5aef2f86898510815fe9b5aac20bf",
+    "sha256": "2f01166f3895c987e91f4ad47426ac38ac80e900d4b6ee4da125112d7292b197",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002b/audio/EN2002b.Headset-2.wav"
+  },
+  "ami-EN2002b.Headset-3.wav": {
+    "md5": "9fdc923040cbee43bd05473bdfa1960b",
+    "sha256": "68f495547ef9674d1d6848c12d7358829cc6e6d302268c0c51c3e3c470b7f692",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002b/audio/EN2002b.Headset-3.wav"
+  },
+  "ami-EN2002c.Headset-0.wav": {
+    "md5": "1b2dc5d11524bcd81c55285959137b0a",
+    "sha256": "ae1fb1e4eece37cf1c03ce1b62d8c80f46dad5f7241b9130fcae5bf4de254b29",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002c/audio/EN2002c.Headset-0.wav"
+  },
+  "ami-EN2002c.Headset-1.wav": {
+    "md5": "ca41e0896cbc1d3af7930493056e21c3",
+    "sha256": "0f997b3323c334eb4ad8c3ec9daecc9714aa43c68071c24939635965f239e084",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002c/audio/EN2002c.Headset-1.wav"
+  },
+  "ami-EN2002c.Headset-2.wav": {
+    "md5": "1c9dc4e94e951781c1659cd9f7aa4924",
+    "sha256": "f35865f5ae3113db9e3e502aec032d2c12263ed69bd2874464ea2601d2683ab3",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002c/audio/EN2002c.Headset-2.wav"
+  },
+  "ami-EN2002c.Headset-3.wav": {
+    "md5": "c6cef0c53435b2f7c22d31e5b17d8437",
+    "sha256": "cb01cbf5ee48543860ab07fd92186585ef8b6cd2ecd7a5bda7348aed97836e35",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002c/audio/EN2002c.Headset-3.wav"
+  },
+  "ami-EN2002d.Headset-0.wav": {
+    "md5": "163b570fa4324d457526c925234ba56b",
+    "sha256": "88cf01860709899d62d9466d145838d7b64d8b959ab82c041ae73c9c6ad06b5d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002d/audio/EN2002d.Headset-0.wav"
+  },
+  "ami-EN2002d.Headset-1.wav": {
+    "md5": "a97655d02507cf860b7fe1290ad75eb5",
+    "sha256": "28486ee15ec50a876274ccf014992338cb68df9c5e56de7a6a670a7bb8e3dccd",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002d/audio/EN2002d.Headset-1.wav"
+  },
+  "ami-EN2002d.Headset-2.wav": {
+    "md5": "9dec56dccd7276103afc9c2b0d1a44e8",
+    "sha256": "a0709a1431afe4ad336d2a82be1d73b491f96477d306863cc756a16693213902",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002d/audio/EN2002d.Headset-2.wav"
+  },
+  "ami-EN2002d.Headset-3.wav": {
+    "md5": "ae105a04c1ae7b2f387317c345fd99cb",
+    "sha256": "5e38b0f277f40107573f4492d44e2ec0bd1295e32e2cbf95ab4f3d137166f575",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/EN2002d/audio/EN2002d.Headset-3.wav"
+  },
+  "ami-ES2004a.Headset-0.wav": {
+    "md5": "f33da7de50eb63e31ff871d4fc55c5fc",
+    "sha256": "abb4917719c6e033b066fbd400b6d37fe46ddd62c89b513f77016a51f54e2ad1",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004a/audio/ES2004a.Headset-0.wav"
+  },
+  "ami-ES2004a.Headset-1.wav": {
+    "md5": "8c331257f0041dc144702efb9e35f988",
+    "sha256": "9be8e84e4ef93ea7eef669470cd6db017856f38f7321e0054199ad7393a1199c",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004a/audio/ES2004a.Headset-1.wav"
+  },
+  "ami-ES2004a.Headset-2.wav": {
+    "md5": "87b349ee82716228d83b1e9903a40b20",
+    "sha256": "a4f2f8ea7d965ede2c010e36bfc31c14c7792d07419bd5bc9519c8ddd1c8bc28",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004a/audio/ES2004a.Headset-2.wav"
+  },
+  "ami-ES2004a.Headset-3.wav": {
+    "md5": "2bd0c2013cb1aeace36a0b06d5107183",
+    "sha256": "5b3cf59816d5160d77ff00315dc7f6db816c175edb65e0d61691679fae633572",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004a/audio/ES2004a.Headset-3.wav"
+  },
+  "ami-ES2004b.Headset-0.wav": {
+    "md5": "973ad9766bb0c3286416408a58d32188",
+    "sha256": "824c27ff7a5cff2568cfa79ce493bc0a7b5a09cedb67e407b5c55fd26b3ac8a4",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004b/audio/ES2004b.Headset-0.wav"
+  },
+  "ami-ES2004b.Headset-1.wav": {
+    "md5": "830950b486613b8a9fd29f48d90fa0a3",
+    "sha256": "b6c803f4a665ba465d5ed81eba0e0977dbfe25803b5965823ff0863c87d79325",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004b/audio/ES2004b.Headset-1.wav"
+  },
+  "ami-ES2004b.Headset-2.wav": {
+    "md5": "81e025e59b92c4fd7fd9c7e512f4d343",
+    "sha256": "accf163836dcfeab5a57073b119be736840b1865f153d16528a65da12efc1355",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004b/audio/ES2004b.Headset-2.wav"
+  },
+  "ami-ES2004b.Headset-3.wav": {
+    "md5": "cc82cfeacf5e5af3e8cb06d71b47d641",
+    "sha256": "f6b7ccc28d8a8193ecd26f14798cc5c44950adae335b70d155ba9e2f4ac38611",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004b/audio/ES2004b.Headset-3.wav"
+  },
+  "ami-ES2004c.Headset-0.wav": {
+    "md5": "f22e19793095328b2d06d65ee780c8c2",
+    "sha256": "4df81bbdf7a3398a8813ea2ddd251e4d7040a909a25870c5ddef59eedb080c66",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004c/audio/ES2004c.Headset-0.wav"
+  },
+  "ami-ES2004c.Headset-1.wav": {
+    "md5": "d7a86985ac32afecf629d365a3f51801",
+    "sha256": "5a0f57e67aabddf175e609696233f154f7a3bf88dab9872e25789df81e0c539b",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004c/audio/ES2004c.Headset-1.wav"
+  },
+  "ami-ES2004c.Headset-2.wav": {
+    "md5": "a36e7eed8f4cb31a814ecb1ee6480fa0",
+    "sha256": "a00984e6465343765ab4ada33bfecd004cf9ebd5abcebe792e39eb1efde1fdbd",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004c/audio/ES2004c.Headset-2.wav"
+  },
+  "ami-ES2004c.Headset-3.wav": {
+    "md5": "81c8102e4391c77afcd1d5dd8c5c6c93",
+    "sha256": "5e3b33053c70a9e7deac6200a9656c6d52d15005925716979a5a26f143b5f84f",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004c/audio/ES2004c.Headset-3.wav"
+  },
+  "ami-ES2004d.Headset-0.wav": {
+    "md5": "6484f332c0eabd13a9785ebbf12dfcf1",
+    "sha256": "210058ed9a9083e71faa63505662d62e9ae4fe10e0a7d8af606ea99b13e4ee90",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004d/audio/ES2004d.Headset-0.wav"
+  },
+  "ami-ES2004d.Headset-1.wav": {
+    "md5": "e40b68bfdbd5cbd24a26c2b9c9ccbcf4",
+    "sha256": "2ee130755b2501bb3e8ae085a491f76aff6d34b8424dd7db1735058f9d22ef5f",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004d/audio/ES2004d.Headset-1.wav"
+  },
+  "ami-ES2004d.Headset-2.wav": {
+    "md5": "0c70ce329b0e40187b876c669cfca6b4",
+    "sha256": "0061f928a9296cae3e69c32eedd9c752037a279aab329aa16f58632f36dcd41d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004d/audio/ES2004d.Headset-2.wav"
+  },
+  "ami-ES2004d.Headset-3.wav": {
+    "md5": "0bb5acbb97ea9ef7024c32b1fcec13ec",
+    "sha256": "b1dae76c373f3e7a378f1e4f8355f7d59311af2075f516bd46dddb18e66d0973",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004d/audio/ES2004d.Headset-3.wav"
+  },
+  "ami-ES2014a.Headset-0.wav": {
+    "md5": "a3bcf514e925991b8e66089b2181c274",
+    "sha256": "87af7ae006e18e42a07eb581f9c4526a774f8c1f9f4990ad362b63c6b7df299f",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014a/audio/ES2014a.Headset-0.wav"
+  },
+  "ami-ES2014a.Headset-1.wav": {
+    "md5": "cb0dc1cbd4ce768dbaff6a49a63124d7",
+    "sha256": "3b1f56aa2ba4ffb3efa90f092f9a6b40ecb16a3ffe38a10ee38fc0220d3c1f6b",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014a/audio/ES2014a.Headset-1.wav"
+  },
+  "ami-ES2014a.Headset-2.wav": {
+    "md5": "ba602b2eb56379380c84e3644f17b562",
+    "sha256": "6cbaa642843c6d29977340515d0813f94ca20631a1db75172aaca02d071ac93a",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014a/audio/ES2014a.Headset-2.wav"
+  },
+  "ami-ES2014a.Headset-3.wav": {
+    "md5": "64f087b7610d29ea529e8bc1391d8384",
+    "sha256": "38ca58a53276ec39bb86d4e05b77a02556b8f664c18d8750a171245d34d987b3",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014a/audio/ES2014a.Headset-3.wav"
+  },
+  "ami-ES2014b.Headset-0.wav": {
+    "md5": "08b7769bb42b210b5e1ca7898c74fcae",
+    "sha256": "51437ce3d332a3028a9035a2ba7c8ff342248dd034c321c1125efd77e5b7b9f0",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014b/audio/ES2014b.Headset-0.wav"
+  },
+  "ami-ES2014b.Headset-1.wav": {
+    "md5": "1f03d92d65eb828e8b496cff0f3e108a",
+    "sha256": "7cac906be303e762850fe0afb18661e6c4a0301f641f5899998a9e08ba33e356",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014b/audio/ES2014b.Headset-1.wav"
+  },
+  "ami-ES2014b.Headset-2.wav": {
+    "md5": "c7c3f6152b30bd97d83b42bd286d681d",
+    "sha256": "ed18ca28eab8de57137afc7914dc05ca87223235c1594cf8444c13c10eb21aab",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014b/audio/ES2014b.Headset-2.wav"
+  },
+  "ami-ES2014b.Headset-3.wav": {
+    "md5": "9f69cf94e9983f4dfc3bd2384f0b4fed",
+    "sha256": "687962f332c7ec5895892ce891cee5c5b35be36c29e49bf11654fb9f06ebd8ff",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014b/audio/ES2014b.Headset-3.wav"
+  },
+  "ami-ES2014c.Headset-0.wav": {
+    "md5": "13f4fe4e317523e328a3a9cd991b0256",
+    "sha256": "c88b03985f288cc9e9d7e670ea0deeaec9ae901d2aa250c3eb91f71d8f084129",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014c/audio/ES2014c.Headset-0.wav"
+  },
+  "ami-ES2014c.Headset-1.wav": {
+    "md5": "4b6385225d4ba49ad9164f03bcf42ea7",
+    "sha256": "12883d728ac2efd850289ff7cb4dc7ed936be68fb01f69a54dccbd0c2542e56d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014c/audio/ES2014c.Headset-1.wav"
+  },
+  "ami-ES2014c.Headset-2.wav": {
+    "md5": "56bfa0a9a567eb2e90ce26a591a30f2d",
+    "sha256": "f74bd01fe70301541898215d024009632ff2b909ebb956ab876f4e1bd4baed48",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014c/audio/ES2014c.Headset-2.wav"
+  },
+  "ami-ES2014c.Headset-3.wav": {
+    "md5": "e40d6e40c76705e0d0f29c61cf9540fc",
+    "sha256": "c65a1b21ad20f0e5ca1916a842a11c256228cc8b57d6ea7a457e46ef35f03b94",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014c/audio/ES2014c.Headset-3.wav"
+  },
+  "ami-ES2014d.Headset-0.wav": {
+    "md5": "c9a826e9492ae7fccf944b987d159a92",
+    "sha256": "aebe37d6b95009827c91a84f2b3245edb36a0ca501bec6d665173694b9e23f3f",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014d/audio/ES2014d.Headset-0.wav"
+  },
+  "ami-ES2014d.Headset-1.wav": {
+    "md5": "7eaa29a40ae2a3af089c186b8ae18877",
+    "sha256": "01123cee32e6466b7ff3df1e65986ad91cee4231635d1717d9bbd00b3e99f705",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014d/audio/ES2014d.Headset-1.wav"
+  },
+  "ami-ES2014d.Headset-2.wav": {
+    "md5": "07bf9621cf03da623246930d5adf753e",
+    "sha256": "9898bb8aeb11f1b68ab58de0d049e2c2c5f40c05a15b04b0df7e4a8baf579885",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014d/audio/ES2014d.Headset-2.wav"
+  },
+  "ami-ES2014d.Headset-3.wav": {
+    "md5": "1a2b1db7895ed24b3cb308e8b2291e0d",
+    "sha256": "f8e44c96f3a1aee3b3f8a13ebfbf6b0beb463dced9cf36386e970acd1552b636",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2014d/audio/ES2014d.Headset-3.wav"
+  },
+  "ami-IS1009a.Headset-0.wav": {
+    "md5": "052661c772733b0db5c8cc9d393803df",
+    "sha256": "634f42207e488b0eab3b34a81ff16d565705f8fc5e37be7cc3c3b56617ae3257",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009a/audio/IS1009a.Headset-0.wav"
+  },
+  "ami-IS1009a.Headset-1.wav": {
+    "md5": "5784ae2c55c16991852ccb308621d35e",
+    "sha256": "db98d175dda0d07613795c715667a72b99c5372aabd14ee4dcb94d1fa9c273ee",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009a/audio/IS1009a.Headset-1.wav"
+  },
+  "ami-IS1009a.Headset-2.wav": {
+    "md5": "0c66e799186d67300fd6d9a7e8f764f7",
+    "sha256": "9e28bfd55727b07d6a6020b7bf2797d113b35c69a1a3ad25cc4150be0937bf28",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009a/audio/IS1009a.Headset-2.wav"
+  },
+  "ami-IS1009a.Headset-3.wav": {
+    "md5": "c040708c7b8028b7648fcd126b4b7873",
+    "sha256": "7a0b041ad2f2cd9af1c8fcee08e598d6d88bd8f77a3174d7eb9e281a30ca0413",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009a/audio/IS1009a.Headset-3.wav"
+  },
+  "ami-IS1009b.Headset-0.wav": {
+    "md5": "a94df933580f3708c5b6b31bf881a46b",
+    "sha256": "e31fa0e413e662e7872093fc006788f6534ef8a0a7aea2387fa1ae534d7d31a8",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009b/audio/IS1009b.Headset-0.wav"
+  },
+  "ami-IS1009b.Headset-1.wav": {
+    "md5": "8e25c524d8250df4962e0a71587a7371",
+    "sha256": "4b226f2c9552650f189d52cf62b12863764cdd48dedda27fb4e8cb344863ad10",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009b/audio/IS1009b.Headset-1.wav"
+  },
+  "ami-IS1009b.Headset-2.wav": {
+    "md5": "0b12e937df2c3d89b3fc63550c1d92aa",
+    "sha256": "a301ab3be81e249563e96518debd9bd3180ca33afbc39791622c6455a9cb7050",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009b/audio/IS1009b.Headset-2.wav"
+  },
+  "ami-IS1009b.Headset-3.wav": {
+    "md5": "9be6cf6d9e8d2016077c43a67aa19252",
+    "sha256": "d771f57b69281026626f4e4eb2904109982fa7bb3c33cad28dfaf34896aa3624",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009b/audio/IS1009b.Headset-3.wav"
+  },
+  "ami-IS1009c.Headset-0.wav": {
+    "md5": "392a265da610203e22a6fcd1d9618592",
+    "sha256": "2d0b713a9a10ad3b3ea1719c845ab3758be092d09cfced4a37188a5084af412d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009c/audio/IS1009c.Headset-0.wav"
+  },
+  "ami-IS1009c.Headset-1.wav": {
+    "md5": "b1543509d13af61be2a8e5e5d4e328a5",
+    "sha256": "f95638c9089e04f1c523887d18a18a612cc74ffe7805fba0ad9fecaa55ebd62d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009c/audio/IS1009c.Headset-1.wav"
+  },
+  "ami-IS1009c.Headset-2.wav": {
+    "md5": "331735de365ca25e840a2a5f9a8ab041",
+    "sha256": "2a58b4c93f34daf6fdafc3f4a7f86020b9c3c7445b6804ad32540d5055081f88",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009c/audio/IS1009c.Headset-2.wav"
+  },
+  "ami-IS1009c.Headset-3.wav": {
+    "md5": "2d43acd33449b321d21c67ee2b3715a1",
+    "sha256": "0728c2e4e6123be0151f4315303654b95e0113244654abec2ff1cffb5e339d24",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009c/audio/IS1009c.Headset-3.wav"
+  },
+  "ami-IS1009d.Headset-0.wav": {
+    "md5": "5dbcbb348d726c0538020883a2371d71",
+    "sha256": "66c73315fc23dfe4dbf20aa62bdd63d8d0347572e4846d3708857c2d77667dee",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009d/audio/IS1009d.Headset-0.wav"
+  },
+  "ami-IS1009d.Headset-1.wav": {
+    "md5": "b88b04838a7b9f0761ad7fc98c4a4198",
+    "sha256": "b491356392d997f6edaf6bb803eeabb66a3360bababfa3ab8885605cb1c98168",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009d/audio/IS1009d.Headset-1.wav"
+  },
+  "ami-IS1009d.Headset-2.wav": {
+    "md5": "d15170281a6ebb81627eaf993ea8bf3d",
+    "sha256": "bfc4661f8e4d6ec82792411c268beb0a0663cdb9b924ecee43dc388255cee772",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009d/audio/IS1009d.Headset-2.wav"
+  },
+  "ami-IS1009d.Headset-3.wav": {
+    "md5": "457d6aff40891b8d427d23746456eb3e",
+    "sha256": "45105c65c6b2162368c8f305029db6913edd24d962b6d0f7d93deca10978b402",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/IS1009d/audio/IS1009d.Headset-3.wav"
+  },
+  "ami-TS3003a.Headset-0.wav": {
+    "md5": "1779e95265854a8a4b839265e92f02e4",
+    "sha256": "3c027c3cc99e439a9c0850b22c5148674f155f32ce178b43a69d4a39be28b173",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003a/audio/TS3003a.Headset-0.wav"
+  },
+  "ami-TS3003a.Headset-1.wav": {
+    "md5": "58ad2153d0b6c60f9a8847f013bb91ab",
+    "sha256": "8b3526ddbdbbafbd285d52c08322395e79e3b715ce90d6b749a5d712240cb51f",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003a/audio/TS3003a.Headset-1.wav"
+  },
+  "ami-TS3003a.Headset-2.wav": {
+    "md5": "311cddd44d8a5d64474628552a7688ce",
+    "sha256": "ec768ea3dd2ae1a28ce383fc35a5f64556993416dc28e4d2d87ea9116ee8a5c6",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003a/audio/TS3003a.Headset-2.wav"
+  },
+  "ami-TS3003a.Headset-3.wav": {
+    "md5": "2d33ecbc9f37a6f7194cf26837cd7a8d",
+    "sha256": "7055b7dda7ac2d5a5a336e7b5d7e7009277df21774d2a0633dd9772b08eaaacc",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003a/audio/TS3003a.Headset-3.wav"
+  },
+  "ami-TS3003b.Headset-0.wav": {
+    "md5": "5da367e22fc8750e7b01e5c53b15bd35",
+    "sha256": "2bad3e4ab1c0fd044891d7ef0ad3684f835091f76eccaea6eb2636c697b76c9d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003b/audio/TS3003b.Headset-0.wav"
+  },
+  "ami-TS3003b.Headset-1.wav": {
+    "md5": "ce7f7097cf0b9369ed13891ec9e7a8c7",
+    "sha256": "7b765872cb866b8b63842c1bf89e086145c84dc3dd1b952fe88c383f06e67fd6",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003b/audio/TS3003b.Headset-1.wav"
+  },
+  "ami-TS3003b.Headset-2.wav": {
+    "md5": "120ef4a7e2ceb0711d8d8435767df463",
+    "sha256": "694085cb8cd24504869e8d79be50469d963e152cfa4a5b65f59e6d2657f89f41",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003b/audio/TS3003b.Headset-2.wav"
+  },
+  "ami-TS3003b.Headset-3.wav": {
+    "md5": "ed94bbc18343deb608790de50b3d68ae",
+    "sha256": "b10d479fbd72831670c9caadc793f02a6e72880e3c6cfb617a879980b54b5023",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003b/audio/TS3003b.Headset-3.wav"
+  },
+  "ami-TS3003c.Headset-0.wav": {
+    "md5": "ccf5108c82a3afb78430ee97dd902747",
+    "sha256": "2011c8262787016fcd590064d1f1cf57bb36f58c596972fff0d0a4d39eea3b33",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003c/audio/TS3003c.Headset-0.wav"
+  },
+  "ami-TS3003c.Headset-1.wav": {
+    "md5": "460c99036bef8c438d641b09a8fc068d",
+    "sha256": "96989d4270d183ca3df0552fed5a655ee45378cb2059eb534e0c18549cbe5f02",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003c/audio/TS3003c.Headset-1.wav"
+  },
+  "ami-TS3003c.Headset-2.wav": {
+    "md5": "8f3cef12f48e3a0af3eb875036bb1280",
+    "sha256": "0017240bb25d8067c069a199f8e01706fe3288e6eae9ab87324429d2efa2717e",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003c/audio/TS3003c.Headset-2.wav"
+  },
+  "ami-TS3003c.Headset-3.wav": {
+    "md5": "51f936f1313a9257b12ebc36ffb74898",
+    "sha256": "1215f020604beece7f3e2d0eac9cae439f70bbc749a5209fea94e659b85177ce",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003c/audio/TS3003c.Headset-3.wav"
+  },
+  "ami-TS3003d.Headset-0.wav": {
+    "md5": "ff97cb9c717a6c8e8ce94530107b1082",
+    "sha256": "b8ba489d252dc6f7e70d1c281083bd086dde190a1468a33ecf092ccf01738502",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003d/audio/TS3003d.Headset-0.wav"
+  },
+  "ami-TS3003d.Headset-1.wav": {
+    "md5": "59bd145478394ef7170d26452b454ab2",
+    "sha256": "57380f4aa833bf11e3dee2764b3748c1acd8a4d4cc37ff4ff1306981103a9c74",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003d/audio/TS3003d.Headset-1.wav"
+  },
+  "ami-TS3003d.Headset-2.wav": {
+    "md5": "9da9ed5c47791014c66d25901f9aba01",
+    "sha256": "8b279e06b0c243b5b77bf7387cb6f5ec2910ef7792eadf624a6f6292bc511097",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003d/audio/TS3003d.Headset-2.wav"
+  },
+  "ami-TS3003d.Headset-3.wav": {
+    "md5": "a5580fde5254a8996df432812cdda789",
+    "sha256": "18eaa25589712fd9c1fcbc66bca28bf11a0297a514f77cd27810be64c51f5287",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3003d/audio/TS3003d.Headset-3.wav"
+  },
+  "ami-TS3007a.Headset-0.wav": {
+    "md5": "485334dd8bda291e598d75d465fbd5b7",
+    "sha256": "4b47d34a1ab7e1b32d8d1569e2e5a032603fcbe8660964ce2380d0666c656ed5",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007a/audio/TS3007a.Headset-0.wav"
+  },
+  "ami-TS3007a.Headset-1.wav": {
+    "md5": "74a4ac3ffd2f28375cf64534194d73ce",
+    "sha256": "67a71caa34eb1c1d0fb9e86dffddd0b36d6ffb4a2ede89f84fe8c0c76a5c4644",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007a/audio/TS3007a.Headset-1.wav"
+  },
+  "ami-TS3007a.Headset-2.wav": {
+    "md5": "d479b7f152024c98499480ef5c16f6ce",
+    "sha256": "cadc6b8838dd0b9fbe5562f4342d9381934ec756cf9dac234388bf9c4eb36dde",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007a/audio/TS3007a.Headset-2.wav"
+  },
+  "ami-TS3007a.Headset-3.wav": {
+    "md5": "331628ab7d7896fd610a772b44c6f838",
+    "sha256": "36d874f2423857c5673723d3eade35679ffc9b6618ba3bc2c3b2ccdfdcb50b49",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007a/audio/TS3007a.Headset-3.wav"
+  },
+  "ami-TS3007b.Headset-0.wav": {
+    "md5": "81ead041db71a7f0b7cd45be26a6c865",
+    "sha256": "59001ec1f94a23b353542005986d739a8667b811f25e40b31e3353b01a5753a1",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007b/audio/TS3007b.Headset-0.wav"
+  },
+  "ami-TS3007b.Headset-1.wav": {
+    "md5": "f40294c5770691a6c13dac10635b5b87",
+    "sha256": "08f045ccb31bebbcaecf5982d528f5b80212bd34cada60a26c8c6de1cc5ffd93",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007b/audio/TS3007b.Headset-1.wav"
+  },
+  "ami-TS3007b.Headset-2.wav": {
+    "md5": "73dc5949ef9be071eedf5f89c573f837",
+    "sha256": "e304e57abfcfd631269304ee2f652821f7b19fdb2752dfcdee58c87db8621d46",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007b/audio/TS3007b.Headset-2.wav"
+  },
+  "ami-TS3007b.Headset-3.wav": {
+    "md5": "4555258f19fcf28864050e535b525d73",
+    "sha256": "821ca10e33815446997ea2674c7b402a6712c192cf323a04663c6eb91067c264",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007b/audio/TS3007b.Headset-3.wav"
+  },
+  "ami-TS3007c.Headset-0.wav": {
+    "md5": "1191b74b5ca62bcde5741b994066f168",
+    "sha256": "cf485ebe045a0d4031221aa30918c42a2582f4fcf7796e6c8da4a8cded179d89",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007c/audio/TS3007c.Headset-0.wav"
+  },
+  "ami-TS3007c.Headset-1.wav": {
+    "md5": "e1119e0601851c007d629025ccfe63b9",
+    "sha256": "3fe09f926b1a5ffdd6d49e0ab885f2a5da371a0bc2b6773dd0291c22184e9cad",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007c/audio/TS3007c.Headset-1.wav"
+  },
+  "ami-TS3007c.Headset-2.wav": {
+    "md5": "b3b8992ec86a9060ab6bf625af1ab1b9",
+    "sha256": "3d95f710ad4faf33fb435c3fa835f9cf52ce43ef7c70a2879beac9b7b535a3c9",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007c/audio/TS3007c.Headset-2.wav"
+  },
+  "ami-TS3007c.Headset-3.wav": {
+    "md5": "9d319e9fd9ffc04b3724e84aacd3064b",
+    "sha256": "d6793e2eb8a183e8cd6e313d786f705c0d3b298fb65732627e3bc82bbe5ba90e",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007c/audio/TS3007c.Headset-3.wav"
+  },
+  "ami-TS3007d.Headset-0.wav": {
+    "md5": "4c4e496da4ad0b1745b4214ef5354e69",
+    "sha256": "5f77cef37f6400b16ab0e29a343d840e2cdfda6671eac62117032e9409288ab7",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007d/audio/TS3007d.Headset-0.wav"
+  },
+  "ami-TS3007d.Headset-1.wav": {
+    "md5": "04906915c74a5bfae48888d47962839a",
+    "sha256": "330aa8b58485694e1ed1f0a6d36a7dd74d4b8ad1a6d030b1fa95e84c3b698599",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007d/audio/TS3007d.Headset-1.wav"
+  },
+  "ami-TS3007d.Headset-2.wav": {
+    "md5": "6e7184b1353edcaa61d660f438953a4f",
+    "sha256": "4e0858845029d09493460a37006b2d92470cacc9068ba6e5ef00d45686cce9ac",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007d/audio/TS3007d.Headset-2.wav"
+  },
+  "ami-TS3007d.Headset-3.wav": {
+    "md5": "3028c7177d84c8eda83234d7a8d9e6dc",
+    "sha256": "d0ad456a779046de705974def1b2695eecc76696c7097bbc72eff6a5aa74f884",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/TS3007d/audio/TS3007d.Headset-3.wav"
+  },
+  "ami-annotations-1.6.2": {
+    "md5": "b9db091820ca3bd2d8f41a774e43d475",
+    "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d",
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip"
+  },
+  "librispeech-test-clean.tar.gz": {
+    "md5": "32fa31d27d2e1cad72775fee3f4849a9",
+    "sha256": "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
+    "url": "https://www.openslr.org/resources/12/test-clean.tar.gz"
+  }
+}

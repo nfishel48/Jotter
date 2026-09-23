@@ -19,6 +19,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
 from . import score as scoring
 
 
@@ -52,19 +53,61 @@ def _git_sha() -> str:
 
 
 def _git_dirty() -> bool:
-    """A result measured from uncommitted code cannot be reproduced from a sha,
-    and the report should say so rather than imply otherwise."""
+    """Whether the *code* that produced this result is uncommitted.
+
+    A result measured from uncommitted code cannot be reproduced from a sha,
+    and the report should say so rather than imply otherwise.
+
+    The results directory is excluded, and that exclusion is the whole point.
+    This runs while the report it describes is being written into that
+    directory, so counting it made the flag true on essentially every run —
+    including the first run of any new corpus, where `results/` is necessarily
+    untracked, and every rerun after, where the previous file is modified.
+    `results/README.md` tells people to check this field before quoting a
+    figure, and a field that is always `true` is one they learn to skip.
+
+    `work/` and `data/` need no exclusion: they are gitignored, so they never
+    appear here in the first place.
+    """
     try:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parent,
+        ).stdout.strip()
         out = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
             check=True,
             cwd=Path(__file__).resolve().parent,
-        ).stdout.strip()
-        return bool(out)
+        ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+    try:
+        ignore = paths.RESULTS.resolve().relative_to(Path(root).resolve()).as_posix() + "/"
+    except ValueError:  # results live outside the repo; nothing to exclude
+        ignore = None
+
+    return any(not _under(line, ignore) for line in out.splitlines() if line.strip())
+
+
+def _under(status_line: str, prefix: str | None) -> bool:
+    """Is a `git status --porcelain` line about a path below `prefix`?
+
+    Porcelain is `XY <path>`, with renames as `old -> new` and paths holding
+    special characters quoted. The new name is the one that decides a rename,
+    since that is where the file is now.
+    """
+    if prefix is None:
+        return False
+    path = status_line[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"').startswith(prefix)
 
 
 def build(
@@ -80,7 +123,6 @@ def build(
         "corpus": corpus,
         "wer": result.wer,
         "wer_ci95": [low, high],
-        "cer": scoring.character_rate(result),
         "counts": {
             "utterances": len(result.utterances),
             "reference_words": counts.reference_length,
@@ -127,6 +169,52 @@ def build(
     }
 
 
+def diagnose(counts: dict) -> str:
+    """Name the dominant error type and say which half of the pipeline it implicates.
+
+    Spelled out rather than left to the reader, because the three types point
+    at different stages and the reflex on a bad WER is to blame the acoustic
+    model. Insertions especially: on per-speaker meeting channels they are
+    usually a reference-coverage problem, not a recognition one, and reading
+    them as recogniser error sends you off fixing the wrong thing.
+    """
+    errors = counts["substitutions"] + counts["deletions"] + counts["insertions"]
+    if not errors:
+        return "No errors: every reference word was recognised, with nothing added."
+
+    kinds = {k: counts[k] for k in ("substitutions", "deletions", "insertions")}
+    label, count = max(kinds.items(), key=lambda kv: kv[1])
+    share = count / errors
+
+    if share < 0.5:
+        return (
+            f"No single error type dominates — the largest is {label} at "
+            f"{share:.1%} of errors. That is ordinary recognition difficulty "
+            "spread across the corpus rather than one stage misbehaving."
+        )
+
+    meaning = {
+        "substitutions": (
+            "That points at the acoustic model: the words are being heard, and "
+            "heard wrong."
+        ),
+        "deletions": (
+            "That points at segmentation: speech the detector never passed on, "
+            "so the recogniser never had a chance at it."
+        ),
+        "insertions": (
+            "That means words with nothing in the reference to match them. "
+            "Either the recogniser is inventing text, or it is correctly "
+            "transcribing speech the reference does not cover — the usual cause "
+            "on per-speaker meeting channels, where each headset mic also picks "
+            "up the rest of the room. Check a worst-offender transcript below "
+            "before reading this as a model problem."
+        ),
+    }[label]
+
+    return f"**{label.capitalize()} dominate — {share:.1%} of all errors.** {meaning}"
+
+
 def to_markdown(summary: dict) -> str:
     counts = summary["counts"]
     speed = summary["speed"]
@@ -138,7 +226,7 @@ def to_markdown(summary: dict) -> str:
         f"# {summary['corpus']}",
         "",
         f"**WER {summary['wer']:.2%}**  (95% CI {low:.2%}–{high:.2%})",
-        f"CER {summary['cer']:.2%} · {counts['utterances']} utterances · "
+        f"{counts['utterances']} utterances · "
         f"{counts['reference_words']} reference words",
         "",
     ]
@@ -172,8 +260,7 @@ def to_markdown(summary: dict) -> str:
 
     lines += [
         "",
-        "Deletions dominating points at segmentation — speech the detector never "
-        "passed on. Substitutions dominating points at the acoustic model.",
+        diagnose(counts),
         "",
         "## Cost",
         "",
@@ -232,8 +319,8 @@ def write(summary: dict, directory: Path, stem: str) -> tuple[Path, Path]:
 def compare_table(summaries: list[dict]) -> str:
     """One table across several runs — the thing to paste into a README."""
     lines = [
-        "| corpus | segmentation | WER | 95% CI | CER | RTF | comparable |",
-        "| --- | --- | ---: | :---: | ---: | ---: | :---: |",
+        "| corpus | segmentation | WER | 95% CI | RTF | comparable |",
+        "| --- | --- | ---: | :---: | ---: | :---: |",
     ]
     for s in summaries:
         low, high = s["wer_ci95"]
@@ -242,7 +329,6 @@ def compare_table(summaries: list[dict]) -> str:
             f"| {s.get('bench', {}).get('segmentation', '?')} "
             f"| {s['wer']:.2%} "
             f"| {low:.2%}–{high:.2%} "
-            f"| {s['cer']:.2%} "
             f"| {s['speed']['real_time_factor']:.3f} "
             f"| {'yes' if s['comparable_to_published'] else 'no'} |"
         )
