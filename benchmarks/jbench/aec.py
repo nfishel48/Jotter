@@ -30,6 +30,14 @@ working rather than asserting that it does.
 and once with it skipped, and the word error rates are compared. A canceller
 that improves ERLE by 20 dB and the transcript by nothing has not helped.
 
+The "after" pass goes through the ordinary route rather than forcing the
+cancelled track on the recogniser, so it measures what a user would get. When
+the pass damages the near voice past the bar in `src/audio/meta.rs`,
+`Meta::preferred_mic_path` hands back the raw track and both transcripts come
+out identical — a `=` in the delta column, and a real answer rather than a
+gap. `--no-transcribe` drops back to dB figures alone, which is ~20x faster
+and enough when sweeping parameters rather than judging a build.
+
 **Run this on real speech.** The near and far signals come from a prepared
 corpus for a reason. An adaptive filter finds a tonal or periodic signal
 trivially predictable, so synthetic audio produces ERLE figures that swing by
@@ -47,7 +55,8 @@ from pathlib import Path
 import numpy as np
 
 from . import paths, recording, room
-from .audio import read_mono
+from . import score as scoring
+from .audio import duration_secs, read_mono
 
 #: Seconds per regime. Long enough for AEC3's filter to converge — a two-second
 #: far-only stretch would measure its adaptation time rather than its ceiling.
@@ -56,6 +65,13 @@ REGIME_SECS = 8.0
 #: Echo return loss values to sweep, in dB. Spans "barely audible bleed" to
 #: "the speakers are as loud as you are".
 DEFAULT_SWEEP = (0.0, 6.0, 12.0, 18.0, 24.0)
+
+#: The gate in `Meta::preferred_mic_path` (`src/audio/meta.rs`), which decides
+#: whether the cancelled track is the one that gets transcribed. Mirrored here
+#: rather than inferred, because "the pass wrote a file" and "the recogniser
+#: read it" are different questions and this table used to conflate them.
+USABLE_ERLE_DB = 6.0
+MAX_NEAR_LOSS_DB = -1.0
 
 
 @dataclass
@@ -66,6 +82,17 @@ class Condition:
     erl_db: float
     directory: Path
     reference: str
+
+
+def fits_regime(path: Path) -> bool:
+    """Whether a clip plays in full inside one regime.
+
+    The selection rule for the test set, shared with the caller that picks
+    clips out of a corpus so it can go looking for enough of them rather than
+    discovering the shortfall in `build`. See `build` for why truncation is
+    not an option.
+    """
+    return duration_secs(path) <= REGIME_SECS
 
 
 def build(
@@ -81,7 +108,25 @@ def build(
     Needs four clips per item — two near, two far — so speech in the double-talk
     regime is not a repeat of speech the recogniser has already seen, which
     would make that regime artificially easy.
+
+    Clips longer than a regime are dropped rather than truncated. `_fit` cuts
+    the audio at `REGIME_SECS`, but the transcript that becomes the reference
+    is the whole clip's — so a 10.4s clip in an 8s regime puts words in the
+    answer key that were never played, and every condition inherits a floor of
+    deletions it cannot avoid. That inflates both sides of the comparison
+    equally and so leaves the delta usable, but it makes the absolute rates
+    fiction, and a benchmark whose headline number is fiction invites being
+    quoted anyway. Short clips are still padded with silence, which costs
+    nothing: silence in the reference is silence in the audio.
     """
+    usable = [c for c in clips if fits_regime(c[1])]
+    if len(usable) < 4:
+        raise ValueError(
+            f"need 4 clips of {REGIME_SECS:g}s or shorter, found {len(usable)} "
+            f"in {len(clips)} — pass more items, or raise REGIME_SECS"
+        )
+    clips = usable
+
     conditions: list[Condition] = []
     for index in range(0, len(clips) - 3, 4):
         near_a, near_b, far_a, far_b = clips[index : index + 4]
@@ -143,9 +188,46 @@ def _fit(signal: np.ndarray, span: int) -> np.ndarray:
     )
 
 
-def measure(condition: Condition) -> dict:
-    """Run the echo pass and read back what it recorded about itself."""
+def _transcribe_mic(directory: Path) -> str:
+    """Transcribe the mic track and return its text.
+
+    `--tracks mic` because the far speaker is echo: anything of theirs in this
+    transcript is an error, not a result.
+    """
     import subprocess
+
+    jotter = paths.cargo_binary("jotter")
+    result = subprocess.run(
+        [str(jotter), "transcribe", str(directory), "--tracks", "mic", "--force"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"jotter transcribe failed:\n{result.stdout}{result.stderr}")
+
+    transcript = json.loads((directory / "transcript.json").read_text())
+    return " ".join(s["text"] for s in transcript["segments"] if s.get("track") == "mic")
+
+
+def measure(condition: Condition, normalizer=None) -> dict:
+    """Run the echo pass, read what it recorded, and check the transcript.
+
+    The dB figures say what the filter did to the signal; the word error rates
+    say whether it was worth doing. Both are reported because they disagree:
+    a pass can remove 20 dB of echo and change nothing the recogniser sees, and
+    that is the case this benchmark exists to catch.
+
+    The "after" transcript is taken through the ordinary path — `jotter
+    process` then `jotter transcribe` — so it measures what a user would
+    actually get. When the pass damages the near voice past the bar in
+    `meta.rs`, `Meta::preferred_mic_path` hands back the raw track and the two
+    transcripts come out identical. That is a real outcome and the table says
+    so rather than hiding it.
+    """
+    import subprocess
+
+    # Before: the raw mic track, with no echo pass in front of it.
+    before_text = _transcribe_mic(condition.directory)
 
     jotter = paths.cargo_binary("jotter")
     result = subprocess.run(
@@ -155,6 +237,17 @@ def measure(condition: Condition) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(f"jotter process failed:\n{result.stdout}{result.stderr}")
+
+    after_text = _transcribe_mic(condition.directory)
+
+    wer_before = wer_after = None
+    if normalizer is not None:
+        wer_before = scoring.score_pair(
+            condition.item_id, condition.reference, before_text, normalizer
+        ).rate
+        wer_after = scoring.score_pair(
+            condition.item_id, condition.reference, after_text, normalizer
+        ).rate
 
     meta = json.loads((condition.directory / "meta.json").read_text())
     aec = meta.get("aec") or {}
@@ -177,6 +270,12 @@ def measure(condition: Condition) -> dict:
         # Whether the pass's own verdict cleared the bar in `meta.rs` — the
         # decision that actually decides which track gets transcribed.
         "output": aec.get("path"),
+        # The verdict the dB figures cannot give. `wer_delta` is negative when
+        # cancelling helped, matching `bench compare`'s sign convention.
+        "wer_before": wer_before,
+        "wer_after": wer_after,
+        "wer_delta": None if wer_before is None else wer_after - wer_before,
+        "transcript_changed": before_text != after_text,
     }
 
 
@@ -184,8 +283,8 @@ def summarise(rows: list[dict]) -> str:
     """The sweep as a table: where cancellation works, and where it stops."""
     lines = [
         "| ERL (dB) | ERLE (dB) | near-end damage (dB) | far-only (s) | double-talk (s) "
-        "| delay (ms) | used |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | :--- |",
+        "| delay (ms) | used | WER before | WER after | delta |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | :--- | ---: | ---: | ---: |",
     ]
     for row in sorted(rows, key=lambda r: r["erl_db"]):
         lines.append(
@@ -195,7 +294,10 @@ def summarise(rows: list[dict]) -> str:
             f"| {_fmt(row['far_only_secs'])} "
             f"| {_fmt(row['double_talk_secs'])} "
             f"| {_fmt(row['reported_delay_ms'], '.0f')} "
-            f"| {'yes' if row.get('output') else (row.get('bypassed') or 'no')} |"
+            f"| {_used(row)} "
+            f"| {_pct(row.get('wer_before'))} "
+            f"| {_pct(row.get('wer_after'))} "
+            f"| {_delta(row.get('wer_delta'))} |"
         )
     lines += [
         "",
@@ -204,8 +306,19 @@ def summarise(rows: list[dict]) -> str:
         "`near-end damage` is level lost off the user's own voice on near-only frames;",
         "near zero is the requirement, and `src/audio/meta.rs` rejects the cancelled",
         "track below -1 dB however good the ERLE looks.",
-        "`used` says whether the cancelled track was kept, or names the reason the",
-        "pass bypassed.",
+        "`used` says whether the *recogniser* read the cancelled track — the gate in",
+        "`Meta::preferred_mic_path` — naming the figure that failed when it did not.",
+        "A pass can write a file and still be overruled, and that is not a failure:",
+        "it is the product declining to transcribe audio it judged worse than the raw.",
+        "`WER before`/`after` are the mic transcript scored against the near speaker's",
+        "words alone, with and without the echo pass in front of it. `delta` is",
+        "negative when cancelling helped; `=` means the transcript did not change at",
+        "all, which is what happens when `meta.rs` rejects the cancelled track and",
+        "both passes end up reading the same audio.",
+        "",
+        "**The delta column is the verdict.** Echo removed in dB is the mechanism, not",
+        "the result: a pass that improves ERLE by 20 dB and moves no words has not",
+        "helped anyone. Read the dB columns to explain the delta, not instead of it.",
         "",
         "**Read the far-only column before the ERLE column.** The activity classifier",
         "(`process::classify`) labels frames by energy, per track, so when the bleed is",
@@ -221,3 +334,46 @@ def summarise(rows: list[dict]) -> str:
 
 def _fmt(value, spec: str = ".1f") -> str:
     return "—" if value is None else format(value, spec)
+
+
+def _used(row: dict) -> str:
+    """Did the *recogniser* read the cancelled track?
+
+    Not the same as "did the pass write one". This column used to report
+    `aec.path`, which is set whenever cancellation produced a file — so a row
+    could claim `yes` while `preferred_mic_path` had quietly handed the raw
+    track back for failing the gate, and the `=` in the delta column was the
+    only hint. Naming the failing figure makes the two agree.
+    """
+    if row.get("bypassed"):
+        return str(row["bypassed"])
+    if not row.get("output"):
+        return "no"
+
+    erle, near = row.get("erle_db"), row.get("near_gain_db")
+    if erle is None or near is None:
+        return "no (no verdict)"
+    if erle < USABLE_ERLE_DB:
+        return f"no (ERLE {erle:.1f} < {USABLE_ERLE_DB:g})"
+    if near < MAX_NEAR_LOSS_DB:
+        return f"no (damage {near:.1f} < {MAX_NEAR_LOSS_DB:g})"
+    return "yes"
+
+
+def _pct(value) -> str:
+    return "—" if value is None else f"{value:.1%}"
+
+
+def _delta(value) -> str:
+    """Signed, and explicit about zero.
+
+    A plain `0.0%` would read as "not measured" next to the em dashes in this
+    table; `=` says the transcript did not move, which is the common outcome
+    when `meta.rs` rejects the cancelled track and both passes read the same
+    audio.
+    """
+    if value is None:
+        return "—"
+    if value == 0:
+        return "="
+    return f"{value:+.1%}"

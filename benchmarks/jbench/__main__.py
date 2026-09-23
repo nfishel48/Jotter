@@ -71,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true")
     p.add_argument("--normalizer", choices=["whisper", "basic"], default="whisper")
     p.add_argument("--tag", help="suffix for the result filename")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="processes to align on (default: every core; 1 to stay serial)",
+    )
 
     p = sub.add_parser("compare", help="is the difference between two results real?")
     p.add_argument("baseline", type=Path)
@@ -97,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sweep", help="comma-separated ERL values in dB")
     p.add_argument("--rir", type=Path)
     p.add_argument("--tag")
+    p.add_argument("--normalizer", choices=["whisper", "basic"], default="whisper")
+    p.add_argument("--no-transcribe", action="store_true",
+                   help="dB figures only, skipping the word error rates")
 
     p = sub.add_parser("smoke", help="run the whole harness on generated audio")
 
@@ -136,6 +145,7 @@ def cmd_prepare(args) -> int:
         items = _take(items, args.limit)
 
     items_path, refs_path = _manifest_paths(args.corpus)
+    items = _decoded(items, args.corpus)
     count = manifest.write(items, items_path, refs_path)
     if count == 0:
         print(f"{args.corpus}: no items found under {root}", file=sys.stderr)
@@ -198,22 +208,25 @@ def cmd_score(args) -> int:
             file=sys.stderr,
         )
 
-    result = scoring.Result()
+    tasks = []
     for item_id, hypothesis in hypotheses.items():
         reference = references.get(item_id)
         if reference is None:
             print(f"warning: {item_id} has a hypothesis but no reference", file=sys.stderr)
             continue
-        result.utterances.append(
-            scoring.score_pair(
-                item_id,
-                reference["reference"],
-                hypothesis.get("text", ""),
-                normalizer,
+        tasks.append(
+            scoring.Task(
+                id=item_id,
+                reference=reference["reference"],
+                hypothesis=hypothesis.get("text", ""),
                 audio_secs=hypothesis.get("audio_secs", 0.0),
                 elapsed_secs=hypothesis.get("elapsed_secs", 0.0),
             )
         )
+
+    result = scoring.score_all(
+        tasks, normalizer, workers=args.workers, on_progress=_scoring_progress()
+    )
 
     if not result.utterances:
         print("nothing was scored", file=sys.stderr)
@@ -376,7 +389,10 @@ def cmd_aec(args) -> int:
                 continue
             row = json.loads(line)
             reference = references.get(row["id"])
-            if reference:
+            # Skipped here rather than in `aec.build`, so a corpus of mostly
+            # long utterances yields the requested number of items instead of
+            # silently fewer. A header read per clip, and only until enough.
+            if reference and aec.fits_regime(Path(row["audio"])):
                 clips.append((row["id"], Path(row["audio"]), reference["reference"]))
             if len(clips) >= args.items * 4:
                 break
@@ -392,16 +408,22 @@ def cmd_aec(args) -> int:
     )
     conditions = aec.build(clips, paths.WORK / "aec", sweep=sweep, rir=args.rir)
 
+    # Loaded once and passed down: every condition scores against the same
+    # normaliser, and rebuilding it per item would be the slowest part of a
+    # run that is otherwise all transcription.
+    normalizer = None if args.no_transcribe else normalize.load(args.normalizer)
+
     rows = []
     for condition in conditions:
         print(f"  {condition.directory.name}")
-        rows.append(aec.measure(condition))
+        rows.append(aec.measure(condition, normalizer))
 
     table = aec.summarise(rows)
     summary = {
         "corpus": "aec-sweep",
         "sweep_db": list(sweep),
         "rows": rows,
+        "normalizer": None if normalizer is None else normalizer.provenance(),
         "run": report.provenance({"source_corpus": args.corpus, "items": len(conditions)}),
     }
     stem = "aec-sweep" + (f"-{args.tag}" if args.tag else "")
@@ -413,6 +435,48 @@ def cmd_aec(args) -> int:
     print(table)
     print(f"\nwritten: {paths.RESULTS / stem}.json/.md")
     return 0
+
+
+def _scoring_progress():
+    """A progress line for the alignment pass.
+
+    Scoring a meeting corpus is minutes of arithmetic with nothing to show for
+    it until the report lands, which from the outside is indistinguishable
+    from a hang. On stderr so that piping the report somewhere still works.
+    """
+    import time
+
+    started = time.monotonic()
+
+    def report(done: int, total: int) -> None:
+        sys.stderr.write(
+            f"\r  scoring {done}/{total}  {time.monotonic() - started:.0f}s"
+        )
+        if done == total:
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    return report
+
+
+def _decoded(items, corpus: str):
+    """Point each item at audio `jotter-bench` can actually read.
+
+    Lazy, so the decode is interleaved with the walk rather than done as a
+    separate pass over thousands of files — `manifest.write` streams, and a
+    prepare that printed nothing for ten minutes would look hung.
+
+    The decoded clips live under `work/`, which is gitignored as regenerable;
+    they are, at the cost of re-decoding. `data/` is deliberately left holding
+    exactly what was downloaded and checksum-pinned.
+    """
+    from .audio import ensure_wav
+
+    cache = paths.WORK / corpus / "audio"
+    for item in items:
+        source = Path(item.audio)
+        item.audio = ensure_wav(source, cache / f"{item.id}.wav")
+        yield item
 
 
 def _manifest_paths(corpus: str) -> tuple[Path, Path]:

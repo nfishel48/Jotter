@@ -24,7 +24,9 @@ not; `bench score --sclite` cross-checks against it where it is installed.
 
 from __future__ import annotations
 
+import os
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 # Backtrace directions. Plain ints rather than an enum: this is the inner loop
@@ -199,17 +201,125 @@ def score_pair(
     )
 
 
-def character_rate(result: Result) -> float:
-    """CER over the normalised text.
+# ---------------------------------------------------------------------------
+# Running the scorer over a whole corpus.
+#
+# `align` is O(n*m) pure Python, so a meeting-length corpus is minutes of
+# arithmetic rather than seconds. Threads cannot help — the work is bytecode
+# and the GIL serialises it — so this fans out across processes.
+# ---------------------------------------------------------------------------
 
-    Worth reporting beside WER because they disagree in a diagnostic way: a
-    recogniser that mangles one phoneme per word scores terribly on WER and
-    mildly on CER, while one that drops whole phrases scores badly on both.
+
+@dataclass
+class Task:
+    """One item waiting to be scored, before normalisation."""
+
+    id: str
+    reference: str
+    hypothesis: str
+    audio_secs: float = 0.0
+    elapsed_secs: float = 0.0
+
+    @property
+    def cost(self) -> int:
+        """Rough size of the alignment table, for scheduling.
+
+        Word counts off the raw text: normalising first would be more accurate
+        and would also mean doing the expensive half of the work twice.
+        """
+        return (self.reference.count(" ") + 1) * (self.hypothesis.count(" ") + 1)
+
+
+_worker_normalizer = None
+
+
+def _init_worker(mode: str) -> None:
+    """Rebuild the normaliser inside each worker rather than pickling it.
+
+    The whisper normaliser closes over a few thousand spelling entries and
+    comes from an import each process has to do anyway.
     """
-    total = Counts()
-    for u in result.utterances:
-        total = total + align(list(u.reference.replace(" ", "")), list(u.hypothesis.replace(" ", "")))
-    return total.rate
+    global _worker_normalizer
+    from . import normalize
+
+    _worker_normalizer = normalize.load(mode)
+
+
+def _score_task(indexed: tuple[int, Task]) -> tuple[int, Utterance]:
+    index, task = indexed
+    return index, score_pair(
+        task.id,
+        task.reference,
+        task.hypothesis,
+        _worker_normalizer,
+        audio_secs=task.audio_secs,
+        elapsed_secs=task.elapsed_secs,
+    )
+
+
+# Below this much alignment work, spawning processes costs more than it saves:
+# every worker re-imports transformers to rebuild the normaliser.
+_PARALLEL_THRESHOLD_CELLS = 20_000_000
+
+
+def score_all(
+    tasks: list[Task],
+    normalizer,
+    workers: int | None = None,
+    on_progress=None,
+) -> Result:
+    """Score every item, in parallel when there is enough work to justify it.
+
+    Utterances come back in the order given, never in the order the workers
+    happened to finish: `bootstrap_interval` indexes into this list, so an
+    order that depended on scheduling would move the confidence interval on
+    every rerun.
+    """
+    total = len(tasks)
+    if workers is None:
+        workers = os.cpu_count() or 1
+    workers = max(1, min(workers, total))
+
+    done = 0
+
+    def tick() -> None:
+        nonlocal done
+        done += 1
+        if on_progress:
+            on_progress(done, total)
+
+    if workers == 1 or sum(t.cost for t in tasks) < _PARALLEL_THRESHOLD_CELLS:
+        utterances = []
+        for task in tasks:
+            utterances.append(
+                score_pair(
+                    task.id,
+                    task.reference,
+                    task.hypothesis,
+                    normalizer,
+                    audio_secs=task.audio_secs,
+                    elapsed_secs=task.elapsed_secs,
+                )
+            )
+            tick()
+        return Result(utterances)
+
+    scored: list[Utterance | None] = [None] * total
+    # Longest first. These items are wildly uneven — a 40-minute meeting beside
+    # a one-line utterance — and starting a big one last leaves every other
+    # core idle while it finishes alone.
+    order = sorted(enumerate(tasks), key=lambda it: -it[1].cost)
+
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=_init_worker, initargs=(normalizer.mode,)
+    ) as pool:
+        futures = [pool.submit(_score_task, item) for item in order]
+        for future in as_completed(futures):
+            index, utterance = future.result()
+            scored[index] = utterance
+            tick()
+
+    return Result([u for u in scored if u is not None])
 
 
 def bootstrap_interval(
