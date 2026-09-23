@@ -441,6 +441,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         };
 
         let props = recording_props(&meta);
@@ -530,6 +531,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         };
 
         let props = recording_props(&meta);
@@ -560,6 +562,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         };
 
         let props = recording_props(&meta);

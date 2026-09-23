@@ -213,6 +213,7 @@ mod tests {
             aec: stage,
             transcript: None,
             diarization: None,
+            live: None,
         }
     }
 

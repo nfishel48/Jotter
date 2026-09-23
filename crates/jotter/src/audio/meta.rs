@@ -240,6 +240,57 @@ pub struct DiarizationInfo {
     pub declined: Option<String>,
 }
 
+/// What live transcription did while the recording ran, or why it did not.
+///
+/// Same discipline as the stage blocks: `#[serde(default)]` so a block from an
+/// older build still loads, `version` rather than field presence to tell them
+/// apart, and every field a number or a short fixed string, so the whole
+/// struct is safe to report as telemetry except `path`. The text is in
+/// `live.jsonl`, for the same reason the transcript is not in here either.
+///
+/// Written by `RecordingHandle::stop`, not by an offline pass: live
+/// transcription runs *during* the recording, so its record is part of the
+/// recording's own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveInfo {
+    /// Relative path of the live transcript. Absent when live transcription
+    /// never got as far as writing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Behaviour generation, in the sense of [`AecInfo::version`]: bumped when
+    /// the same audio would give different lines.
+    pub version: u32,
+    /// Catalogue id of the model, empty when none was looked at.
+    pub model: String,
+    pub engine: String,
+    /// Lines written, across both tracks, and the split between them.
+    pub segments: u32,
+    pub mic_segments: u32,
+    pub system_segments: u32,
+    /// Mic segments left out as the system track's audio heard again through
+    /// the microphone. See `audio::live::is_echo`.
+    pub echo_dropped: u32,
+    /// Seconds of audio the worker never saw because it fell behind and its
+    /// queue filled. The WAV files are unaffected; only the live text has a
+    /// hole.
+    pub dropped_secs: f32,
+    /// `stop()` gave up waiting for the tail to be transcribed, so the last
+    /// few seconds of speech may be missing from `live.jsonl`. The final
+    /// transcript is unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drain_timed_out: bool,
+    /// `Some(reason)` when live transcription looked and declined, from
+    /// `LiveDecline::kind()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined: Option<String>,
+    /// `Some(kind)` when it started and then broke: `"engine"`, `"io"` or
+    /// `"panicked"`. A fixed name, like `declined`; the message itself is in
+    /// `LiveStatus::reason` while the recording runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
+}
+
 /// The ERLE below which the cancelled track is not worth preferring.
 ///
 /// Well under the 14-18 dB ceiling the reference recording's coherence implies,
@@ -277,6 +328,12 @@ pub struct Meta {
     /// `skip_serializing_if` for the same load-bearing reason as `aec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diarization: Option<DiarizationInfo>,
+    /// Written by `RecordingHandle::stop` when live transcription was asked
+    /// for, including when it declined.
+    ///
+    /// `skip_serializing_if` for the same load-bearing reason as `aec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveInfo>,
 }
 
 impl Meta {
@@ -375,6 +432,7 @@ mod tests {
             aec: None,
             transcript: None,
             diarization: None,
+            live: None,
         }
     }
 

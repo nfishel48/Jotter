@@ -23,9 +23,9 @@ use jotter::config::{self, Settings};
 use jotter::telemetry::{Prop, Surface, Telemetry, events};
 
 use crate::output::{CliError, ErrorKind, Output};
-use crate::report::RecordingJson;
 #[cfg(any(feature = "aec", feature = "transcribe"))]
 use crate::report;
+use crate::report::RecordingJson;
 use crate::session;
 use crate::settings;
 
@@ -458,8 +458,10 @@ fn record(
         system: args.system.map_or(DeviceChoice::Default, DeviceChoice::Id),
         out_dir,
         allow_duplex_system: args.force_system_on_duplex,
+        // Live transcription is wired into background sessions, not this
+        // blocking command.
+        live: None,
     };
-
     let handle = match audio::start(config) {
         Ok(handle) => handle,
         Err(e) => {

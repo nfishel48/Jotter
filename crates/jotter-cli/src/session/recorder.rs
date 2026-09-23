@@ -62,6 +62,8 @@ fn record_config(session: &SessionState) -> RecordConfig {
             .map_or(DeviceChoice::Default, DeviceChoice::Id),
         out_dir: session.dir.clone(),
         allow_duplex_system: false,
+        // Wired in by the context command, not here.
+        live: None,
     }
 }
 
