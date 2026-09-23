@@ -57,6 +57,11 @@ jotter = { path = "../jotter", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Same version as the library's, so the lockfile resolves one copy.
+chrono = "0.4"
+# Process control for background sessions: signalling the recorder, checking
+# it is still the process it claims to be, and detaching it from the terminal.
+libc = "0.2"
 
 # `jotter-bench` only. Its `--segmentation none` path feeds a whole clip to the
 # recogniser, which is the one thing the library's pass never does, so it

@@ -395,8 +395,9 @@ crates/jotter/                            the library (package `jotter`, no clap
   src/audio/diarize.rs                    speaker labels on the system track  (feature "diarize")
   src/models.rs                           speech-model catalogue and downloader  (feature "transcribe")
 crates/jotter-cli/                        the command line (package `jotter-cli`)
-  src/main.rs                             binary `jotter`: clap parsing, dispatch
+  src/main.rs                             binary `jotter`: clap parsing, the global `--json` flag, dispatch
   src/cli.rs                              every subcommand and its console output
+  src/session/                            `start`/`status`/`stop`: the background recorder and the bundle launch
   src/bin/bench.rs                        `jotter-bench`, the benchmark driver  (feature "bench")
 ```
 

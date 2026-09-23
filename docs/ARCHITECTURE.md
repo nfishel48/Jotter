@@ -628,8 +628,12 @@ CLI, `crates/jotter-cli/src/`:
 
 | Module | Owns |
 | --- | --- |
-| `main.rs` | The `jotter` binary: clap parsing and dispatch |
+| `main.rs` | The `jotter` binary: clap parsing, the global `--json` flag, and dispatch |
 | `cli.rs` | Every subcommand, its flags, and its console output; the `ValueEnum` mirrors of library types |
+| `output.rs` | `--json` versus human output, and the stable error kinds |
+| `report.rs` | The `--json` shapes of a recording and its passes, mapped from the library's reports |
+| `settings.rs` | `jotter config`: reading and changing the stored preferences |
+| `session/` | `jotter start`, `status` and `stop`: the background recorder, the session file, and the macOS bundle launch |
 | `bin/bench.rs` | `jotter-bench`, the benchmark driver (feature `bench`) |
 
 ## Telemetry

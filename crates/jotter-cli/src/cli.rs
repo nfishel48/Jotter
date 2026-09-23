@@ -22,6 +22,13 @@ use jotter::audio::{
 use jotter::config::{self, Settings};
 use jotter::telemetry::{Prop, Surface, Telemetry, events};
 
+use crate::output::{CliError, ErrorKind, Output};
+use crate::report::RecordingJson;
+#[cfg(any(feature = "aec", feature = "transcribe"))]
+use crate::report;
+use crate::session;
+use crate::settings;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Capture mic + system audio to two WAV tracks
@@ -34,6 +41,14 @@ pub enum Command {
     Process(ProcessArgs),
     /// Show or change whether anonymous usage data is sent
     Telemetry(TelemetryArgs),
+    /// Show or change the stored preferences
+    Config(settings::ConfigArgs),
+    /// Start recording in the background and return at once
+    Start(session::StartArgs),
+    /// Show whether a background recording is running
+    Status,
+    /// Stop the background recording, then run the offline passes
+    Stop(session::StopArgs),
     /// Download and inspect the speech models transcription needs
     #[cfg(feature = "transcribe")]
     Models(ModelsArgs),
@@ -43,6 +58,9 @@ pub enum Command {
     /// Work out who said what, in a recording that already has a transcript
     #[cfg(feature = "diarize")]
     Diarize(DiarizeArgs),
+    /// The background recorder. Launched by `start`, never typed.
+    #[command(hide = true, name = "__session-run")]
+    SessionRun(session::recorder::RecorderArgs),
 }
 
 /// `jotter diarize <dir>`.
@@ -252,15 +270,16 @@ pub struct RecordArgs {
 
 /// Mirrors `audio::Sources` rather than deriving `ValueEnum` on it directly:
 /// `audio` compiles in a CLI-free build, and should not depend on clap.
-#[derive(Clone, Copy, ValueEnum)]
-enum SourcesArg {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcesArg {
     Mic,
     System,
     Both,
 }
 
 impl SourcesArg {
-    fn telemetry_name(self) -> &'static str {
+    pub fn telemetry_name(self) -> &'static str {
         match self {
             Self::Mic => "mic",
             Self::System => "system",
@@ -279,40 +298,61 @@ impl From<SourcesArg> for Sources {
     }
 }
 
-pub fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
-    // `telemetry` is handled before the worker starts: it only edits the
-    // settings file, and starting a reporting client in order to turn reporting
-    // off would be a strange thing to do.
-    if let Command::Telemetry(args) = command {
-        return telemetry_command(args);
+pub fn run(command: Command, out: Output) -> Result<(), CliError> {
+    // Before any reporting client starts. `telemetry` and `config` edit the
+    // settings file, and starting a reporting client in order to turn
+    // reporting off would be a strange thing to do; `status` is polled, and
+    // reporting every poll would drown out everything else; the recorder
+    // reports its own events and has no terminal to show a notice on.
+    match command {
+        Command::Telemetry(args) => return telemetry_command(args, out),
+        Command::Config(args) => return settings::config(args, out),
+        Command::Status => return session::status(out),
+        Command::SessionRun(args) => return session::recorder::run(args),
+        _ => {}
     }
 
     let mut settings = Settings::load();
     let telemetry = Telemetry::init(Surface::Cli, &mut settings);
     let first_run = !settings.telemetry_notice_seen;
-    if first_run && telemetry.is_active() {
+    // A notice is for a person. Under `--json`, or with output piped, there
+    // is nobody reading stderr either — and marking it seen then would mean a
+    // user who only ever drives the command from a script is never told.
+    if first_run && telemetry.is_active() && out.notices() {
         telemetry_notice(&mut settings);
     }
     telemetry.track(events::APP_STARTED, &[("is_first_run", first_run.into())]);
 
+    // Read before the match takes `command` apart.
+    let finishing = matches!(command, Command::Stop(_));
+
     let result = match command {
-        Command::Devices => list_devices(&telemetry),
-        Command::Record(args) => record(args, &settings, &telemetry),
+        Command::Devices => list_devices(&telemetry, out),
+        Command::Record(args) => record(args, &settings, &telemetry, out),
+        Command::Start(args) => session::start(args, out),
+        // Finishes the recording itself, which can take minutes, so it owns
+        // its own reporting client rather than holding this one open.
+        Command::Stop(args) => session::stop(args, out),
         #[cfg(feature = "aec")]
-        Command::Process(args) => process(args, &telemetry),
+        Command::Process(args) => process(args, &telemetry, out),
         #[cfg(feature = "transcribe")]
-        Command::Models(args) => models(args),
+        Command::Models(args) => models(args, out),
         #[cfg(feature = "transcribe")]
-        Command::Transcribe(args) => transcribe(args, &telemetry),
+        Command::Transcribe(args) => transcribe(args, &telemetry, out),
         #[cfg(feature = "diarize")]
-        Command::Diarize(args) => diarize(args, &telemetry),
-        Command::Telemetry(_) => unreachable!("handled above"),
+        Command::Diarize(args) => diarize(args, &telemetry, out),
+        Command::Telemetry(_) | Command::Config(_) | Command::Status | Command::SessionRun(_) => {
+            unreachable!("handled above")
+        }
     };
 
     // Explicit rather than relying on `Drop`: this is the one place a CLI run
     // can lose its whole queue, since the process exits immediately after.
-    telemetry.track(events::APP_EXITED, &[("reason", "cli_done".into())]);
-    telemetry.shutdown();
+    // `stop` reports its own exit, from the client it finishes under.
+    if !finishing {
+        telemetry.track(events::APP_EXITED, &[("reason", "cli_done".into())]);
+        telemetry.shutdown();
+    }
 
     result
 }
@@ -341,7 +381,7 @@ fn telemetry_notice(settings: &mut Settings) {
 ///
 /// The persistent way to opt out; the environment variables are the per-run
 /// one. Works the same on a server or over SSH as anywhere else.
-fn telemetry_command(args: TelemetryArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn telemetry_command(args: TelemetryArgs, out: Output) -> Result<(), CliError> {
     let mut settings = Settings::load();
 
     if args.enable || args.disable {
@@ -350,29 +390,44 @@ fn telemetry_command(args: TelemetryArgs) -> Result<(), Box<dyn std::error::Erro
         settings.save()?;
     }
 
-    let stored = if settings.telemetry_enabled {
-        "enabled"
-    } else {
-        "disabled"
+    #[derive(serde::Serialize)]
+    struct TelemetryJson {
+        /// The stored choice, before any environment override.
+        enabled: bool,
+        /// What this run will actually do, override included.
+        effective: bool,
+        /// Whether this build contains the reporting code at all.
+        compiled: bool,
+        /// `off`, `on` or `unset`: what the environment says.
+        env_override: &'static str,
+        config: std::path::PathBuf,
+    }
+    let result = TelemetryJson {
+        enabled: settings.telemetry_enabled,
+        effective: settings.telemetry_allowed(),
+        compiled: cfg!(feature = "telemetry"),
+        env_override: match config::env_override() {
+            config::EnvOverride::ForceOff => "off",
+            config::EnvOverride::ForceOn => "on",
+            config::EnvOverride::Unset => "unset",
+        },
+        config: config::path(),
     };
-    println!("telemetry: {stored}");
-    println!("  config:  {}", config::path().display());
 
-    if !cfg!(feature = "telemetry") {
-        println!("  note:    this build has telemetry compiled out and sends nothing");
-    }
-
-    match config::env_override() {
-        config::EnvOverride::ForceOff => {
-            println!("  note:    overridden to OFF by DO_NOT_TRACK / JOTTER_TELEMETRY");
+    out.emit(&result, |r| {
+        let stored = if r.enabled { "enabled" } else { "disabled" };
+        println!("telemetry: {stored}");
+        println!("  config:  {}", r.config.display());
+        if !r.compiled {
+            println!("  note:    this build has telemetry compiled out and sends nothing");
         }
-        config::EnvOverride::ForceOn => {
-            println!("  note:    overridden to ON by JOTTER_TELEMETRY");
+        match r.env_override {
+            "off" => println!("  note:    overridden to OFF by DO_NOT_TRACK / JOTTER_TELEMETRY"),
+            "on" => println!("  note:    overridden to ON by JOTTER_TELEMETRY"),
+            _ => {}
         }
-        config::EnvOverride::Unset => {}
-    }
-
-    println!("\nSee docs/TELEMETRY.md for exactly what is collected.");
+        println!("\nSee docs/TELEMETRY.md for exactly what is collected.");
+    });
     Ok(())
 }
 
@@ -380,7 +435,8 @@ fn record(
     args: RecordArgs,
     settings: &Settings,
     telemetry: &Telemetry,
-) -> Result<(), Box<dyn std::error::Error>> {
+    out: Output,
+) -> Result<(), CliError> {
     // Read before `args` is taken apart below. None of these identify a
     // device: they are shapes of the request.
     let options = finish_options(&args, settings);
@@ -422,17 +478,30 @@ fn record(
         ],
     );
     let dir = handle.out_dir().to_path_buf();
-    println!("recording to {}", dir.display());
+    if !out.is_json() {
+        println!("recording to {}", dir.display());
+    }
 
     match args.duration {
         Some(secs) => {
-            println!("stopping after {secs}s");
+            if !out.is_json() {
+                println!("stopping after {secs}s");
+            }
             std::thread::sleep(Duration::from_secs(secs));
         }
-        None => {
+        None if crate::can_prompt() && !out.is_json() => {
             println!("press Enter to stop");
             let mut line = String::new();
             std::io::stdin().read_line(&mut line)?;
+        }
+        // Nobody to press Enter: a `--json` caller, or a closed stdin. Waiting
+        // would hang the program driving this, so say so and stop.
+        None => {
+            return Err(CliError::new(
+                ErrorKind::InvalidArgument,
+                "`jotter record` stops on Enter, and nothing is reading this terminal; \
+                 pass --duration SECS, or use `jotter start` and `jotter stop`",
+            ));
         }
     }
 
@@ -445,25 +514,15 @@ fn record(
     };
     telemetry.track(events::RECORDING_COMPLETED, &events::recording_props(&meta));
 
-    println!("\nwrote {:.1}s", meta.duration_secs());
-    if let Some(mic) = &meta.mic {
-        report_track("mic   ", mic);
-    }
-    if let Some(system) = &meta.system {
-        report_track("system", system);
-    }
-    if let Some(offset) = meta.track_offset_secs() {
-        println!("track offset: {:+.3}s (system relative to mic)", offset);
-    }
-
     // After the track report, not instead of it: the recording is the result,
     // and what the offline passes then did to it comes second. Nothing they do
     // can fail this command — the audio is on disk, and `jotter process`,
     // `transcribe` and `diarize` can redo any of them — so a failed pass is
     // printed and the exit status stays zero.
-    let report = finish_recording(&dir, &options);
+    let report = finish_recording(&dir, &options, out);
     track_finish(telemetry, &report);
-    print_finish(&report);
+    let result = RecordingJson::new(&dir, &meta).with_finish(&report);
+    out.emit(&result, |_| print_recording(&meta, Some(&report)));
 
     Ok(())
 }
@@ -505,16 +564,16 @@ fn flag_or(on: bool, off: bool, stored: bool) -> bool {
 
 /// Run `audio::finish` over a just-stopped recording, with a progress line.
 ///
-/// The line is rewritten in place and wiped at the end, and only on a
-/// terminal, for the reason `models pull` gives: piped, carriage returns are
-/// not rewrites but ordinary bytes.
-fn finish_recording(dir: &Path, options: &FinishOptions) -> FinishReport {
-    use std::io::{IsTerminal, Write};
+/// The line is rewritten in place and wiped at the end, on stderr, and only
+/// for a person at a terminal: piped, carriage returns are not rewrites but
+/// ordinary bytes, and under `--json` stderr stays as quiet as stdout.
+pub(crate) fn finish_recording(dir: &Path, options: &FinishOptions, out: Output) -> FinishReport {
+    use std::io::Write;
 
-    let interactive = std::io::stdout().is_terminal();
+    let progress = out.progress();
     let mut last: Option<(FinishStage, u8)> = None;
     let report = audio::finish_with_progress(dir, options, &mut |stage, fraction| {
-        if !interactive {
+        if !progress {
             return;
         }
         let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
@@ -527,11 +586,11 @@ fn finish_recording(dir: &Path, options: &FinishOptions) -> FinishReport {
             FinishStage::Transcribe => "transcribing",
             FinishStage::Diarize => "identifying speakers",
         };
-        print!("\r  {:<40}", format!("{label}… {percent}%"));
-        let _ = std::io::stdout().flush();
+        eprint!("\r  {:<40}", format!("{label}… {percent}%"));
+        let _ = std::io::stderr().flush();
     });
     if last.is_some() {
-        print!("\r{:44}\r", "");
+        eprint!("\r{:44}\r", "");
     }
     report
 }
@@ -621,7 +680,11 @@ fn print_finish(report: &FinishReport) {
 /// Note what is *not* passed: `e.to_string()`. The `Display` impl embeds the
 /// device name and is written for the terminal; `kind` and `cpal_kind` are the
 /// `&'static str` classifications meant to leave the machine.
-fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture::CaptureError) {
+pub(crate) fn report_failure(
+    telemetry: &Telemetry,
+    phase: &'static str,
+    e: &audio::capture::CaptureError,
+) {
     let props: Vec<Prop> = vec![
         ("phase", phase.into()),
         ("error_kind", e.kind().into()),
@@ -634,7 +697,7 @@ fn report_failure(telemetry: &Telemetry, phase: &'static str, e: &audio::capture
 
 /// `jotter process <dir>` — offline echo cancellation.
 #[cfg(feature = "aec")]
-fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+fn process(args: ProcessArgs, telemetry: &Telemetry, out: Output) -> Result<(), CliError> {
     use audio::process::{ProcessOptions, run};
 
     let options = ProcessOptions {
@@ -642,15 +705,25 @@ fn process(args: ProcessArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
         force: args.force,
         delay_ms: args.delay_ms,
     };
-
-    println!("processing {}", args.dir.display());
     let report = run(&args.dir, options)?;
-    report_aec(&report, args.dry_run);
-
     telemetry.track(
         events::RECORDING_PROCESSED,
         &events::aec_props(&report, args.dry_run),
     );
+
+    #[derive(serde::Serialize)]
+    struct ProcessJson {
+        dir: std::path::PathBuf,
+        aec: report::AecJson,
+    }
+    let result = ProcessJson {
+        dir: args.dir.clone(),
+        aec: report::AecJson::new(&report, args.dry_run),
+    };
+    out.emit(&result, |_| {
+        println!("processing {}", result.dir.display());
+        report_aec(&report, args.dry_run);
+    });
     Ok(())
 }
 
@@ -725,12 +798,9 @@ fn report_aec(report: &audio::process::AecReport, dry_run: bool) {
 
 /// `jotter transcribe <dir>` — offline transcription.
 #[cfg(feature = "transcribe")]
-fn transcribe(
-    args: TranscribeArgs,
-    _telemetry: &Telemetry,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn transcribe(args: TranscribeArgs, _telemetry: &Telemetry, out: Output) -> Result<(), CliError> {
     use audio::transcribe::{TranscribeOptions, run_with_progress};
-    use std::io::{IsTerminal, Write};
+    use std::io::Write;
 
     // An unknown id is rejected here rather than silently falling back to the
     // default inside the stage: someone who asked for a particular model and
@@ -738,7 +808,10 @@ fn transcribe(
     if let Some(id) = args.model.as_deref()
         && jotter::models::find(id).is_none()
     {
-        return Err(format!("unknown model {id:?} — see `jotter models list`").into());
+        return Err(CliError::new(
+            ErrorKind::UnknownModel,
+            format!("unknown model {id:?} — see `jotter models list`"),
+        ));
     }
 
     let options = TranscribeOptions {
@@ -748,28 +821,39 @@ fn transcribe(
         tracks: args.tracks.into(),
     };
 
-    println!("transcribing {}", args.dir.display());
-
     // Same rule as `models pull`: a percentage that rewrites itself is for a
-    // terminal, and is line noise in a log.
-    let interactive = std::io::stdout().is_terminal();
+    // terminal, and is line noise in a log. On stderr, so it never mixes with
+    // the result.
+    let progress = out.progress();
     let mut last = u8::MAX;
     let report = run_with_progress(&args.dir, options, &mut |fraction| {
-        if !interactive {
+        if !progress {
             return;
         }
         let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
         if percent != last {
             last = percent;
-            print!("\r  {percent}%");
-            let _ = std::io::stdout().flush();
+            eprint!("\r  {percent}%");
+            let _ = std::io::stderr().flush();
         }
     })?;
-    if interactive && last != u8::MAX {
-        print!("\r");
+    if progress && last != u8::MAX {
+        eprint!("\r{:8}\r", "");
     }
 
-    report_transcript(&report, args.dry_run);
+    #[derive(serde::Serialize)]
+    struct TranscribeJson {
+        dir: std::path::PathBuf,
+        transcribe: report::TranscriptJson,
+    }
+    let result = TranscribeJson {
+        dir: args.dir.clone(),
+        transcribe: report::TranscriptJson::new(&report, args.dry_run),
+    };
+    out.emit(&result, |_| {
+        println!("transcribing {}", result.dir.display());
+        report_transcript(&report, args.dry_run);
+    });
     Ok(())
 }
 
@@ -813,14 +897,17 @@ fn report_transcript(report: &audio::transcribe::TranscriptReport, dry_run: bool
 
 /// `jotter diarize <dir>` — who said what.
 #[cfg(feature = "diarize")]
-fn diarize(args: DiarizeArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+fn diarize(args: DiarizeArgs, telemetry: &Telemetry, out: Output) -> Result<(), CliError> {
     use audio::diarize::{DiarizeOptions, run_with_progress};
-    use std::io::{IsTerminal, Write};
+    use std::io::Write;
 
     // A meeting with nobody in it is a typo, not a request. Rejected here rather
     // than left to the stage so the message can name the flag.
     if args.speakers == Some(0) {
-        return Err("--speakers must be at least 1".into());
+        return Err(CliError::new(
+            ErrorKind::InvalidArgument,
+            "--speakers must be at least 1",
+        ));
     }
 
     let options = DiarizeOptions {
@@ -833,31 +920,42 @@ fn diarize(args: DiarizeArgs, telemetry: &Telemetry) -> Result<(), Box<dyn std::
         speakers: args.speakers.or_else(|| Settings::load().speaker_count()),
     };
 
-    println!("identifying speakers in {}", args.dir.display());
-
     // Same rule as `transcribe`, with one difference worth knowing about: the
     // bar stops a fifth of the way across and stays there. Everything after the
     // resample is a single call into ONNX that cannot report progress — see the
     // note in `audio::diarize`.
-    let interactive = std::io::stdout().is_terminal();
+    let progress = out.progress();
     let mut last = u8::MAX;
     let report = run_with_progress(&args.dir, options, &mut |fraction| {
-        if !interactive {
+        if !progress {
             return;
         }
         let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u8;
         if percent != last {
             last = percent;
-            print!("\r  reading audio… {percent}%");
-            let _ = std::io::stdout().flush();
+            eprint!("\r  reading audio… {percent}%");
+            let _ = std::io::stderr().flush();
         }
     })?;
-    if interactive && last != u8::MAX {
-        print!("\r{:30}\r", "");
+    if progress && last != u8::MAX {
+        eprint!("\r{:30}\r", "");
     }
 
-    report_diarization(&report, args.dry_run);
     telemetry.track(events::RECORDING_DIARIZED, &events::diarize_props(&report));
+
+    #[derive(serde::Serialize)]
+    struct DiarizeJson {
+        dir: std::path::PathBuf,
+        diarize: report::DiarizeJson,
+    }
+    let result = DiarizeJson {
+        dir: args.dir.clone(),
+        diarize: report::DiarizeJson::new(&report, args.dry_run),
+    };
+    out.emit(&result, |_| {
+        println!("identifying speakers in {}", result.dir.display());
+        report_diarization(&report, args.dry_run);
+    });
     Ok(())
 }
 
@@ -919,32 +1017,74 @@ fn report_diarization(report: &audio::diarize::DiarizeReport, dry_run: bool) {
 /// Takes no `Telemetry`: which models someone has on disk is a statement about
 /// what they transcribe, and there is no aggregate worth that.
 #[cfg(feature = "transcribe")]
-fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn models(args: ModelsArgs, out: Output) -> Result<(), CliError> {
     use jotter::models;
 
     match args.command {
         ModelsCommand::Path => {
-            println!("{}", models::models_root().display());
+            #[derive(serde::Serialize)]
+            struct PathJson {
+                path: std::path::PathBuf,
+            }
+            let result = PathJson {
+                path: models::models_root(),
+            };
+            out.emit(&result, |r| println!("{}", r.path.display()));
         }
 
         ModelsCommand::List => {
-            println!("{:<28} {:>8}  {:<10} MODEL", "ID", "SIZE", "STATE");
-            for model in models::CATALOGUE {
-                // Every problem, not just the first, so "3 files missing" does
-                // not read the same as "one truncated file".
-                let state = match model.resolve() {
-                    Ok(_) => "ready".to_string(),
-                    Err(missing) => format!("{} missing", missing.problems.len()),
-                };
-                println!(
-                    "{:<28} {:>8}  {:<10} {}",
-                    model.id,
-                    human_bytes(model.bytes()),
-                    state,
-                    model.description
-                );
+            #[derive(serde::Serialize)]
+            struct ModelJson {
+                id: &'static str,
+                engine: &'static str,
+                description: &'static str,
+                bytes: u64,
+                ready: bool,
+                /// Files missing or the wrong size. Zero when ready.
+                missing: usize,
             }
-            println!("\nkept in {}", models::models_root().display());
+            #[derive(serde::Serialize)]
+            struct ListJson {
+                models_dir: std::path::PathBuf,
+                models: Vec<ModelJson>,
+            }
+            let result = ListJson {
+                models_dir: models::models_root(),
+                models: models::CATALOGUE
+                    .iter()
+                    .map(|model| {
+                        // Every problem, not just the first, so "3 files
+                        // missing" does not read the same as "one truncated".
+                        let missing = model.resolve().err().map(|m| m.problems.len());
+                        ModelJson {
+                            id: model.id,
+                            engine: model.engine,
+                            description: model.description,
+                            bytes: model.bytes(),
+                            ready: missing.is_none(),
+                            missing: missing.unwrap_or(0),
+                        }
+                    })
+                    .collect(),
+            };
+            out.emit(&result, |r| {
+                println!("{:<28} {:>8}  {:<10} MODEL", "ID", "SIZE", "STATE");
+                for model in &r.models {
+                    let state = if model.ready {
+                        "ready".to_string()
+                    } else {
+                        format!("{} missing", model.missing)
+                    };
+                    println!(
+                        "{:<28} {:>8}  {:<10} {}",
+                        model.id,
+                        human_bytes(model.bytes),
+                        state,
+                        model.description
+                    );
+                }
+                println!("\nkept in {}", r.models_dir.display());
+            });
         }
 
         ModelsCommand::Pull(args) => {
@@ -956,45 +1096,72 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
             // Making someone come back for a second deliberate download would
             // cost them more attention than the bytes cost their disk, and would
             // leave `diarize_enabled` dead for everyone who pulled already.
-            let wanted: Vec<&'static models::Model> =
-                match args.model.as_deref() {
-                    Some(id) => vec![models::find(id).ok_or_else(|| {
-                        format!("unknown model {id:?} — see `jotter models list`")
-                    })?],
-                    None => vec![
-                        models::DEFAULT_TRANSCRIPTION_MODEL,
-                        &models::SILERO_VAD,
-                        models::DEFAULT_SEGMENTATION_MODEL,
-                        models::DEFAULT_EMBEDDING_MODEL,
-                    ],
-                };
+            let wanted: Vec<&'static models::Model> = match args.model.as_deref() {
+                Some(id) => vec![models::find(id).ok_or_else(|| {
+                    CliError::new(
+                        ErrorKind::UnknownModel,
+                        format!("unknown model {id:?} — see `jotter models list`"),
+                    )
+                })?],
+                None => vec![
+                    models::DEFAULT_TRANSCRIPTION_MODEL,
+                    &models::SILERO_VAD,
+                    models::DEFAULT_SEGMENTATION_MODEL,
+                    models::DEFAULT_EMBEDDING_MODEL,
+                ],
+            };
 
-            let total: u64 = wanted.iter().map(|m| m.bytes()).sum();
-            println!(
-                "pulling {} model(s), up to {} into {}",
-                wanted.len(),
-                human_bytes(total),
-                models::models_root().display()
-            );
-
-            for model in wanted {
-                println!("\n{} — {}", model.id, model.description);
-                pull_one(model)?;
-            }
-            println!("\ndone");
-
-            // Transcription defaults off precisely because it cannot work
-            // before this command has been run, so the moment it can is the
-            // moment to say how to turn it on. Only when it is still off:
-            // repeating this at someone who has already enabled it is noise.
-            if !Settings::load().transcribe_enabled {
+            if !out.is_json() {
+                let total: u64 = wanted.iter().map(|m| m.bytes()).sum();
                 println!(
-                    "\ntranscribe an existing recording with `jotter transcribe <dir>`,\n\
-                     or a single run with `jotter record --transcribe`. To do it for\n\
-                     every recording, set \"transcribe_enabled\": true in\n  {}",
-                    config::path().display()
+                    "pulling {} model(s), up to {} into {}",
+                    wanted.len(),
+                    human_bytes(total),
+                    models::models_root().display()
                 );
             }
+
+            for model in &wanted {
+                if !out.is_json() {
+                    println!("\n{} — {}", model.id, model.description);
+                }
+                pull_one(model, out)?;
+            }
+
+            #[derive(serde::Serialize)]
+            struct PulledJson {
+                id: &'static str,
+                bytes: u64,
+            }
+            #[derive(serde::Serialize)]
+            struct PullJson {
+                models_dir: std::path::PathBuf,
+                pulled: Vec<PulledJson>,
+            }
+            let result = PullJson {
+                models_dir: models::models_root(),
+                pulled: wanted
+                    .iter()
+                    .map(|m| PulledJson {
+                        id: m.id,
+                        bytes: m.bytes(),
+                    })
+                    .collect(),
+            };
+            out.emit(&result, |_| {
+                println!("\ndone");
+                // Transcription defaults off precisely because it cannot work
+                // before this command has been run, so the moment it can is the
+                // moment to say how to turn it on. Only when it is still off:
+                // repeating this at someone who has already enabled it is noise.
+                if !Settings::load().transcribe_enabled {
+                    println!(
+                        "\ntranscribe an existing recording with `jotter transcribe <dir>`,\n\
+                         or a single run with `jotter record --transcribe`. To do it for\n\
+                         every recording: jotter config set transcribe true"
+                    );
+                }
+            });
         }
     }
 
@@ -1003,41 +1170,50 @@ fn models(args: ModelsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Fetch one model, printing a line per asset.
 ///
-/// The running percentage is rewritten in place with `\r`, and only when stdout
-/// is a terminal. Piped — a CI log, a `tee`, a file — carriage returns are not
-/// rewrites but ordinary bytes, and a 652 MB download would leave one
-/// unreadable line a hundred fragments long. There the per-asset summary line
-/// is the whole output, which is what a log wants anyway.
+/// The running percentage is rewritten in place with `\r`, on stderr, and only
+/// for a person at a terminal. Piped — a CI log, a `tee`, a file — carriage
+/// returns are not rewrites but ordinary bytes, and a 652 MB download would
+/// leave one unreadable line a hundred fragments long. There the per-asset
+/// summary line is the whole output, which is what a log wants anyway. Under
+/// `--json` there is no per-asset output at all: the command's one object
+/// reports what was fetched once it is done.
 #[cfg(feature = "transcribe")]
-fn pull_one(model: &'static jotter::models::Model) -> Result<(), Box<dyn std::error::Error>> {
+fn pull_one(model: &'static jotter::models::Model, out: Output) -> Result<(), CliError> {
     use jotter::models::fetch::{self, Progress};
-    use std::io::{IsTerminal, Write};
+    use std::io::Write;
 
-    let interactive = std::io::stdout().is_terminal();
+    let progress = out.progress();
     let mut last_percent = u64::MAX;
 
     fetch::fetch(model, &mut |event| match event {
-        Progress::Skipped { asset } => println!("  {:<20} already present", asset.name),
+        Progress::Skipped { asset } => {
+            if !out.is_json() {
+                println!("  {:<20} already present", asset.name);
+            }
+        }
         Progress::Started { asset } => {
             last_percent = u64::MAX;
-            if interactive {
-                print!("  {:<20} 0%", asset.name);
-                let _ = std::io::stdout().flush();
+            if progress {
+                eprint!("  {:<20} 0%", asset.name);
+                let _ = std::io::stderr().flush();
             }
         }
         Progress::Bytes { asset, done } => {
-            if !interactive {
+            if !progress {
                 return;
             }
             let percent = done * 100 / asset.bytes.max(1);
             if percent != last_percent {
                 last_percent = percent;
-                print!("\r  {:<20} {percent}%", asset.name);
-                let _ = std::io::stdout().flush();
+                eprint!("\r  {:<20} {percent}%", asset.name);
+                let _ = std::io::stderr().flush();
             }
         }
         Progress::Finished { asset } => {
-            let lead = if interactive { "\r" } else { "" };
+            if out.is_json() {
+                return;
+            }
+            let lead = if progress { "\r" } else { "" };
             println!("{lead}  {:<20} {} ✓", asset.name, human_bytes(asset.bytes));
         }
     })?;
@@ -1061,6 +1237,24 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// The human rendering of a finished recording, shared by `record` and `stop`
+/// so the two report a recording the same way. `finish` is what the offline
+/// passes produced, when they were run.
+pub(crate) fn print_recording(meta: &audio::meta::Meta, finish: Option<&FinishReport>) {
+    println!("\nwrote {:.1}s", meta.duration_secs());
+    if let Some(mic) = &meta.mic {
+        report_track("mic   ", mic);
+    }
+    if let Some(system) = &meta.system {
+        report_track("system", system);
+    }
+    if let Some(offset) = meta.track_offset_secs() {
+        println!("track offset: {:+.3}s (system relative to mic)", offset);
+    }
+    if let Some(finish) = finish {
+        print_finish(finish);
+    }
+}
 fn report_track(label: &str, track: &audio::meta::TrackInfo) {
     let secs = track.frames as f64 / track.sample_rate.max(1) as f64;
     println!(
@@ -1075,7 +1269,7 @@ fn report_track(label: &str, track: &audio::meta::TrackInfo) {
     }
 }
 
-fn list_devices(telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>> {
+fn list_devices(telemetry: &Telemetry, out: Output) -> Result<(), CliError> {
     let devices = match audio::devices::list_devices() {
         Ok(devices) => devices,
         Err(e) => {
@@ -1114,45 +1308,84 @@ fn list_devices(telemetry: &Telemetry) -> Result<(), Box<dyn std::error::Error>>
         ],
     );
 
-    println!(
-        "{:<38} {:<9} {:<5} {:<5} {:<9} FLAGS",
-        "NAME", "DIRECTION", "IN", "OUT", "LOOPBACK"
-    );
-    for (_, info) in &devices {
-        let mut flags = Vec::new();
-        if info.is_default_input {
-            flags.push("default-in");
-        }
-        if info.is_default_output {
-            flags.push("default-out");
-        }
+    #[derive(serde::Serialize)]
+    struct DeviceJson {
+        name: String,
+        /// Pass to `--mic` or `--system`.
+        id: Option<String>,
+        /// `input`, `output`, `duplex` or `unknown`.
+        direction: &'static str,
+        supports_input: bool,
+        supports_output: bool,
+        /// Whether cpal can tap this device for system audio. A duplex device
+        /// cannot: it would record its microphone instead.
+        loopback: bool,
+        default_input: bool,
+        default_output: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct DevicesJson {
+        devices: Vec<DeviceJson>,
+        /// Whether any device can be tapped for system audio.
+        loopback_available: bool,
+    }
+    let result = DevicesJson {
+        loopback_available: devices.iter().any(|(_, i)| i.can_loopback()),
+        devices: devices
+            .iter()
+            .map(|(_, info)| DeviceJson {
+                name: info.name.clone(),
+                id: info.id.clone(),
+                direction: direction_name(info.direction),
+                supports_input: info.supports_input,
+                supports_output: info.supports_output,
+                loopback: info.can_loopback(),
+                default_input: info.is_default_input,
+                default_output: info.is_default_output,
+            })
+            .collect(),
+    };
+
+    out.emit(&result, |r| {
         println!(
-            "{:<38} {:<9} {:<5} {:<5} {:<9} {}",
-            truncate(&info.name, 38),
-            format!("{:?}", info.direction),
-            info.supports_input,
-            info.supports_output,
-            if info.can_loopback() { "yes" } else { "NO" },
-            flags.join(", ")
+            "{:<38} {:<9} {:<5} {:<5} {:<9} FLAGS",
+            "NAME", "DIRECTION", "IN", "OUT", "LOOPBACK"
         );
-    }
-
-    println!("\nids (pass to --mic / --system):");
-    for (_, info) in &devices {
-        if let Some(id) = &info.id {
-            println!("  {:<38} {}", truncate(&info.name, 38), id);
+        for device in &r.devices {
+            let mut flags = Vec::new();
+            if device.default_input {
+                flags.push("default-in");
+            }
+            if device.default_output {
+                flags.push("default-out");
+            }
+            println!(
+                "{:<38} {:<9} {:<5} {:<5} {:<9} {}",
+                truncate(&device.name, 38),
+                device.direction,
+                device.supports_input,
+                device.supports_output,
+                if device.loopback { "yes" } else { "NO" },
+                flags.join(", ")
+            );
         }
-    }
 
-    // The LOOPBACK column is the whole point of this listing: cpal only taps
-    // system audio on a device that reports no input support.
-    if !devices.iter().any(|(_, i)| i.can_loopback()) {
-        println!(
-            "\nWARNING: no output-only device found. Every output here also reports \
-             an input, so cpal would record a microphone instead of system audio."
-        );
-    }
+        println!("\nids (pass to --mic / --system):");
+        for device in &r.devices {
+            if let Some(id) = &device.id {
+                println!("  {:<38} {}", truncate(&device.name, 38), id);
+            }
+        }
 
+        // The LOOPBACK column is the whole point of this listing: cpal only
+        // taps system audio on a device that reports no input support.
+        if !r.loopback_available {
+            println!(
+                "\nWARNING: no output-only device found. Every output here also reports \
+                 an input, so cpal would record a microphone instead of system audio."
+            );
+        }
+    });
     Ok(())
 }
 
@@ -1161,5 +1394,18 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max - 1).collect::<String>() + "…"
+    }
+}
+
+/// `input`, `output`, `duplex` or `unknown`, from cpal's direction.
+///
+/// Matched on the debug spelling rather than the enum, because cpal is the
+/// library's dependency and this crate does not name it.
+fn direction_name(direction: impl std::fmt::Debug) -> &'static str {
+    match format!("{direction:?}").to_ascii_lowercase().as_str() {
+        "input" => "input",
+        "output" => "output",
+        "duplex" => "duplex",
+        _ => "unknown",
     }
 }
